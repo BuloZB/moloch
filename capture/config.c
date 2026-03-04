@@ -935,11 +935,15 @@ LOCAL char *arkime_config_redis_get(const char *url)
     }
 
     int dataLen = atoi(line + 1);
-    if (dataLen < 0) {
+    if (dataLen < 0 || dataLen > 10 * 1024 * 1024) {
         close(fd);
         CONFIGEXIT("Redis key not found or invalid response length: %d", dataLen);
     }
     char *data = malloc(dataLen + 1);
+    if (!data) {
+        close(fd);
+        CONFIGEXIT("Failed to allocate %d bytes for Redis response", dataLen + 1);
+    }
 
     // Read exact data bytes
     int total = 0;
@@ -1229,6 +1233,11 @@ LOCAL void arkime_config_load()
     config.parsersDir       = arkime_config_str_list(keyfile, "parsersDir", CONFIG_PREFIX "/parsers ; ./parsers ");
     config.caTrustFile      = arkime_config_str(keyfile, "caTrustFile", NULL);
     char *offlineRegex      = arkime_config_str(keyfile, "offlineFilenameRegex", "(?i)\\.(pcap|cap)$");
+
+    if (config.bpf && *config.bpf == 0) {
+        g_free(config.bpf);
+        config.bpf = NULL;
+    }
 
     if (config.interface) {
         for (config.interfaceCnt = 0; config.interfaceCnt < MAX_INTERFACES && config.interface[config.interfaceCnt]; config.interfaceCnt++) {
