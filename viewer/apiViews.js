@@ -24,53 +24,24 @@ class ViewAPIs {
 
     const roles = [...await user.getRoles()]; // es requires an array for terms search
 
-    // only get views for setting user or shared
-    const query = {
-      query: {
-        bool: {
-          filter: [
-            {
-              bool: {
-                should: [
-                  { terms: { roles } }, // shared via user role
-                  { terms: { editRoles: roles } }, // shared via user editRoles
-                  { term: { users: user.userId } }, // shared via userId
-                  { term: { user: user.userId } } // created by this user
-                ]
-              }
-            }
-          ]
-        }
-      },
-      sort: {},
+    const allowedViewsSortFields = { name: 1, expression: 1, created: 1 };
+    const params = {
+      user: user.userId,
+      roles,
+      all: req.query.all && roles.includes('arkimeAdmin'),
+      sortField: allowedViewsSortFields[req.query.sort] ? req.query.sort : 'name',
+      sortOrder: req.query.desc === 'true' ? 'desc' : 'asc',
       from: req.query.start || 0,
-      size: req.query.length || 50
+      size: req.query.length || 50,
+      searchTerm: req.query.searchTerm
     };
 
-    if (req.query.all && roles.includes('arkimeAdmin')) {
-      query.query.bool.filter = []; // remove sharing restrictions
-    }
+    const { data: views, total: recordsFiltered } = await Db.searchViews(params);
+    const recordsTotal = await Db.numberOfViews({ ...params, searchTerm: undefined });
 
-    query.sort[req.query.sort || 'name'] = {
-      order: req.query.desc === 'true' ? 'desc' : 'asc'
-    };
-
-    if (req.query.searchTerm) {
-      query.query.bool.filter.push({
-        wildcard: { name: '*' + req.query.searchTerm + '*' }
-      });
-    }
-
-    const { body: { hits: views } } = await Db.searchViews(query);
-
-    delete query.sort;
-    delete query.size;
-    delete query.from;
-    const { body: { count: total } } = await Db.numberOfViews(query);
-
-    const results = views.hits.map((view) => {
-      const id = view._id;
-      const result = view._source;
+    const results = views.map((view) => {
+      const id = view.id;
+      const result = view.source;
 
       if ( // remove sensitive information for users this is shared with
         // (except creator, arkimeAdmin, and editors)
@@ -89,7 +60,7 @@ class ViewAPIs {
       return result;
     });
 
-    return { data: results, recordsTotal: views.total, recordsFiltered: total };
+    return { data: results, recordsTotal, recordsFiltered };
   }
 
   // --------------------------------------------------------------------------
@@ -134,25 +105,35 @@ class ViewAPIs {
    */
   static async apiCreateView (req, res) {
     if (!ArkimeUtil.isString(req.body.name)) {
-      return res.serverError(403, 'Missing view name');
+      return res.serverError(403, 'Missing view name', 'api.views.missingName');
     }
 
     if (!ArkimeUtil.isString(req.body.expression)) {
-      return res.serverError(403, 'Missing view expression');
+      return res.serverError(403, 'Missing view expression', 'api.views.missingExpression');
     }
 
     const user = req.settingUser;
 
-    req.body.user = user.userId;
-
     // comma/newline separated value -> array of values
     let users = ArkimeUtil.commaOrNewlineStringToArray(req.body.users || '');
     users = await User.validateUserIds(users);
-    req.body.users = users.validUsers;
+
+    const doc = {
+      name: req.body.name,
+      expression: req.body.expression,
+      user: user.userId,
+      users: users.validUsers,
+      roles: req.body.roles,
+      editRoles: req.body.editRoles
+    };
+
+    if (req.body.sessionsColConfig !== undefined) {
+      doc.sessionsColConfig = req.body.sessionsColConfig;
+    }
 
     try {
-      const { body: { _id: id } } = await Db.createView(req.body);
-      const { body: { _source: view } } = await Db.getView(id);
+      const id = await Db.createView(doc);
+      const view = await Db.getView(id);
 
       view.id = id;
       view.users = view.users?.join(',') ?? '';
@@ -161,11 +142,12 @@ class ViewAPIs {
         success: true,
         view,
         text: 'Created view!',
+        i18n: 'api.views.created',
         invalidUsers: ArkimeUtil.safeStr(users.invalidUsers)
       });
     } catch (err) {
       console.log(`ERROR - ${req.method} /api/view (createView)`, util.inspect(err, false, 50));
-      return res.serverError(500, 'Error creating view');
+      return res.serverError(500, 'Error creating view', 'api.views.errorCreating');
     }
   }
 
@@ -182,11 +164,12 @@ class ViewAPIs {
       await Db.deleteView(req.params.id);
       res.json({
         success: true,
-        text: 'Deleted view successfully'
+        text: 'Deleted view successfully',
+        i18n: 'api.views.deleted'
       });
     } catch (err) {
       console.log(`ERROR - ${req.method} /api/view/%s (deleteView)`, ArkimeUtil.sanitizeStr(req.params.id), util.inspect(err, false, 50));
-      return res.serverError(500, 'Error deleting view');
+      return res.serverError(500, 'Error deleting view', 'api.views.errorDeleting');
     }
   }
 
@@ -201,50 +184,61 @@ class ViewAPIs {
   static async apiUpdateView (req, res) {
     // make sure all the necessary data is included in the body
     if (!ArkimeUtil.isString(req.body.name)) {
-      return res.serverError(403, 'Missing view name');
+      return res.serverError(403, 'Missing view name', 'api.views.missingName');
     }
 
     if (!ArkimeUtil.isString(req.body.expression)) {
-      return res.serverError(403, 'Missing view expression');
+      return res.serverError(403, 'Missing view expression', 'api.views.missingExpression');
     }
 
-    const view = req.body;
-
     try {
-      const { body: dbView } = await Db.getView(req.params.id);
+      const dbViewSource = await Db.getView(req.params.id);
 
-      // sets the owner if it has changed
-      if (!await User.setOwner(req, res, view, dbView._source, 'user')) {
+      const doc = {
+        name: req.body.name,
+        expression: req.body.expression,
+        users: dbViewSource.users,
+        roles: req.body.roles,
+        editRoles: req.body.editRoles,
+        user: req.body.user ?? dbViewSource.user
+      };
+
+      if (req.body.sessionsColConfig !== undefined) {
+        doc.sessionsColConfig = req.body.sessionsColConfig;
+      } else if (dbViewSource.sessionsColConfig !== undefined) {
+        doc.sessionsColConfig = dbViewSource.sessionsColConfig;
+      }
+
+      // checks permission and validates new owner (only creator/admin can transfer)
+      if (!await User.setOwner(req, res, doc, dbViewSource, 'user')) {
         return;
       }
 
-      // can't update the id
-      if (view.id) { delete view.id; }
-
       // comma/newline separated value -> array of values
-      let users = ArkimeUtil.commaOrNewlineStringToArray(view.users || '');
+      let users = ArkimeUtil.commaOrNewlineStringToArray(req.body.users || '');
       users = await User.validateUserIds(users);
-      view.users = users.validUsers;
+      doc.users = users.validUsers;
 
       try {
-        await Db.setView(req.params.id, view);
-        const { body: { _source: newView } } = await Db.getView(req.params.id);
+        await Db.setView(req.params.id, doc);
+        const newView = await Db.getView(req.params.id);
         newView.users = newView.users?.join(',') ?? '';
-        newView.id = dbView._id;
+        newView.id = req.params.id;
 
         return res.json({
           view: newView,
           success: true,
           text: 'Updated view!',
+          i18n: 'api.views.updated',
           invalidUsers: ArkimeUtil.safeStr(users.invalidUsers)
         });
       } catch (err) {
         console.log(`ERROR - ${req.method} /api/view/%s (setView)`, ArkimeUtil.sanitizeStr(req.params.id), util.inspect(err, false, 50));
-        return res.serverError(500, 'Error updating view');
+        return res.serverError(500, 'Error updating view', 'api.views.errorUpdating');
       }
     } catch (err) {
       console.log(`ERROR - ${req.method} /api/view/%s (getView)`, ArkimeUtil.sanitizeStr(req.params.id), util.inspect(err, false, 50));
-      return res.serverError(500, 'Fetching view to update failed');
+      return res.serverError(500, 'Fetching view to update failed', 'api.views.errorFetching');
     }
   }
 }

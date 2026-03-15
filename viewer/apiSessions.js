@@ -380,7 +380,12 @@ class SessionAPIs {
     options.order.push('ITEM-HTTP');
     options.order.push('ITEM-SMTP');
 
-    const decodeOptions = JSON.parse(req.query.decode || '{}');
+    let decodeOptions;
+    try {
+      decodeOptions = JSON.parse(req.query.decode || '{}');
+    } catch (e) {
+      return res.serverError(400, 'Invalid decode parameter', 'api.sessions.invalidDecodeParam');
+    }
     for (const key in decodeOptions) {
       if (ArkimeUtil.isPP(key)) { continue; }
       if (key.match(/^ITEM/)) {
@@ -864,7 +869,7 @@ class SessionAPIs {
 
   // --------------------------------------------------------------------------
   static async #sendSessionsList (req, res, list) {
-    if (!list) { return res.serverError(200, 'Missing list of sessions'); }
+    if (!list) { return res.serverError(200, 'Missing list of sessions', 'api.sessions.missingList'); }
 
     const saveId = Config.nodeName() + '-' + new Date().getTime().toString(36);
 
@@ -888,7 +893,7 @@ class SessionAPIs {
       } else {
         let sendPath = `/api/session/${fields.node}/${sid}/send?saveId=${saveId}&remoteCluster=${cluster}`;
         if (ArkimeUtil.isString(req.body.tags)) {
-          sendPath += `&tags=${req.body.tags}`;
+          sendPath += `&tags=${encodeURIComponent(req.body.tags)}`;
         }
 
         await new Promise((resolve) => {
@@ -909,7 +914,7 @@ class SessionAPIs {
     function sendResult(total) {
       if (total === 0) {
         res.status(404);
-        return res.end(JSON.stringify({ success: false, text: 'no sessions found' }));
+        return res.end(JSON.stringify({ success: false, text: 'no sessions found', i18n: 'api.sessions.noSessionsFound' }));
       }
       res.end();
     }
@@ -1522,7 +1527,7 @@ class SessionAPIs {
    *   curl -v 'http://localhost:8005/api/sessions?date=-1&expression=ip.src%3D%3D1.2.3.4'
    */
   static async getSessions (req, res) {
-    let map = {};
+    let map = {}; // eslint-disable-line no-useless-assignment
     let graph = {};
 
     let options = {};
@@ -1676,7 +1681,7 @@ class SessionAPIs {
       SessionAPIs.sessionsListFromIds(req, ids, fields, (err, list) => {
         if (err) {
           console.log('ERROR - getSessionsCSV', util.inspect(err, false, 50));
-          res.end(JSON.stringify({ success: false, text: 'Can\'t get sessions from IDs' }));
+          res.end(JSON.stringify({ success: false, text: 'Can\'t get sessions from IDs', i18n: 'api.sessions.cantGetSessions' }));
         }
         SessionAPIs.#csvListWriter(req, res, ['start', 'data', 'end'], list, reqFields);
       });
@@ -1687,7 +1692,8 @@ class SessionAPIs {
         SessionAPIs.#csvListWriter(req, res, ['data'], chunk, reqFields);
       }, (err) => {
         if (err) {
-          return res.send('Could not build query.  Err: ' + err);
+          console.log('ERROR - Could not build query for CSV', err);
+          return res.send('Could not build query. Err: ' + err);
         } else {
           SessionAPIs.#csvListWriter(req, res, ['end'], null, reqFields);
         }
@@ -1892,7 +1898,7 @@ class SessionAPIs {
     // req.query.exp -> req.query.field by viewer.js:expToField
 
     if (req.query.field !== undefined && !ArkimeUtil.isString(req.query.field, 0)) {
-      return res.serverError(403, `Bad 'field' parameter`);
+      return res.serverError(403, `Bad 'field' parameter`, 'api.sessions.badFieldParam');
     }
 
     BuildQuery.build(req, (bsqErr, query, indices) => {
@@ -2090,7 +2096,7 @@ class SessionAPIs {
    */
   static getSPIGraphHierarchy (req, res) {
     if (req.query.exp === undefined) {
-      return res.serverError(403, 'Missing exp parameter');
+      return res.serverError(403, 'Missing exp parameter', 'api.sessions.missingExpParam');
     }
 
     const fields = [];
@@ -2312,7 +2318,8 @@ class SessionAPIs {
         query.query.bool.filter.push({
           script: {
             script: {
-              source: `doc["${req.query.field}"].size() > 0 && doc["${req.query.field}"].value.toString().startsWith("${req.query.autocomplete}")`
+              source: `doc["${req.query.field}"].size() > 0 && doc["${req.query.field}"].value.toString().startsWith(params.prefix)`,
+              params: { prefix: req.query.autocomplete }
             }
           }
         });
@@ -2501,7 +2508,7 @@ class SessionAPIs {
     options.arkime_unflatten = parseInt(req.query.flatten) !== 1;
     Db.getSession(req.params.id, options, (err, session) => {
       if (err || !session.found) {
-        return res.serverError(500, 'Session not found');
+        return res.serverError(500, 'Session not found', 'api.sessions.sessionNotFound');
       }
 
       session = session.fields;
@@ -2525,7 +2532,7 @@ class SessionAPIs {
     Db.getSession(req.params.id, options, (err, session) => {
       if (err || !session.found) {
         console.log("Couldn't look up detail data, error for session %s Error: ", ArkimeUtil.safeStr(req.params.id), err);
-        return res.serverError(500, "Couldn't look up detail data, error for session " + ArkimeUtil.safeStr(req.params.id) + ' Error: ' + err);
+        return res.serverError(500, "Couldn't look up detail data for session " + ArkimeUtil.safeStr(req.params.id));
       }
 
       session = session.fields;
@@ -2613,7 +2620,7 @@ class SessionAPIs {
     }
 
     if (tags.length === 0) {
-      return res.serverError(200, 'No tags specified');
+      return res.serverError(200, 'No tags specified', 'api.sessions.noTagsSpecified');
     }
 
     if (req.body.ids) {
@@ -2621,14 +2628,15 @@ class SessionAPIs {
 
       SessionAPIs.sessionsListFromIds(req, ids, ['tags', 'node'], (err, list) => {
         if (!list.length) {
-          return res.serverError(200, 'No sessions to add tags to');
+          return res.serverError(200, 'No sessions to add tags to', 'api.sessions.noSessionsToAddTags');
         }
         SessionAPIs.addTagsList(tags, list, async () => {
           await Db.flush('sessions*');
           await Db.refresh('sessions*');
           return res.json({
             success: true,
-            text: 'Tags added successfully'
+            text: 'Tags added successfully',
+            i18n: 'api.sessions.tagsAdded'
           });
         });
       });
@@ -2638,16 +2646,18 @@ class SessionAPIs {
           await SessionAPIs.addTagsList(tags, list);
         }, async (err, total) => {
           if (err) {
-            return res.send('Could not build query.  Err: ' + err);
+            console.log('ERROR - Could not build query for addTags', err);
+            return res.send('Could not build query. Err: ' + err);
           }
           if (!total) {
-            return res.serverError(200, 'No sessions to add tags to');
+            return res.serverError(200, 'No sessions to add tags to', 'api.sessions.noSessionsToAddTags');
           }
           await Db.flush('sessions*');
           await Db.refresh('sessions*');
           return res.json({
             success: true,
-            text: 'Tags added successfully'
+            text: 'Tags added successfully',
+            i18n: 'api.sessions.tagsAdded'
           });
         });
     }
@@ -2676,7 +2686,7 @@ class SessionAPIs {
     }
 
     if (tags.length === 0) {
-      return res.serverError(200, 'No tags specified');
+      return res.serverError(200, 'No tags specified', 'api.sessions.noTagsSpecified');
     }
 
     if (req.body.ids) {
@@ -2684,13 +2694,14 @@ class SessionAPIs {
 
       SessionAPIs.sessionsListFromIds(req, ids, ['tags', 'node'], (err, list) => {
         if (!list.length) {
-          return res.serverError(200, 'No sessions to remove tags from');
+          return res.serverError(200, 'No sessions to remove tags from', 'api.sessions.noSessionsToRemoveTags');
         }
         SessionAPIs.#removeTagsList(tags, list, async () => {
           await Db.refresh('sessions*');
           return res.json({
             success: true,
-            text: 'Tags removed successfully'
+            text: 'Tags removed successfully',
+            i18n: 'api.sessions.tagsRemoved'
           });
         });
       });
@@ -2700,15 +2711,17 @@ class SessionAPIs {
           await SessionAPIs.#removeTagsList(tags, list);
         }, async (err, total) => {
           if (err) {
-            return res.send('Could not build query.  Err: ' + err);
+            console.log('ERROR - Could not build query for removeTags', err);
+            return res.send('Could not build query. Err: ' + err);
           }
           if (!total) {
-            return res.serverError(200, 'No sessions to remove tags from');
+            return res.serverError(200, 'No sessions to remove tags from', 'api.sessions.noSessionsToRemoveTags');
           }
           await Db.refresh('sessions*');
           return res.json({
             success: true,
-            text: 'Tags removed successfully'
+            text: 'Tags removed successfully',
+            i18n: 'api.sessions.tagsRemoved'
           });
         });
     }
@@ -3381,7 +3394,7 @@ class SessionAPIs {
    */
   static deleteData (req, res) {
     if (req.query.removeSpi !== 'true' && req.query.removePcap !== 'true') {
-      return res.serverError(403, `You can't delete nothing`);
+      return res.serverError(403, `You can't delete nothing`, 'api.sessions.cantDeleteNothing');
     }
 
     let whatToRemove;
@@ -3394,7 +3407,7 @@ class SessionAPIs {
     }
 
     if (!req.body.ids && !req.query.expression) {
-      return res.serverError(403, `Error: Missing expression. An expression is required so you don't delete everything.`);
+      return res.serverError(403, `Error: Missing expression. An expression is required so you don't delete everything.`, 'api.sessions.missingDeleteExpression');
     }
 
     function sendResult(total) {
@@ -3442,9 +3455,9 @@ class SessionAPIs {
 
     const cluster = req.query.remoteCluster;
 
-    if (!ArkimeUtil.isString(req.query.saveId)) { return res.serverError(200, 'Missing saveId'); }
-    if (!ArkimeUtil.isString(cluster)) { return res.serverError(200, 'Missing cluster'); }
-    if (!internals.remoteClusters || !internals.remoteClusters[cluster]) { return res.serverError(200, 'Unknown cluster'); }
+    if (!ArkimeUtil.isString(req.query.saveId)) { return res.serverError(200, 'Missing saveId', 'api.sessions.missingSaveId'); }
+    if (!ArkimeUtil.isString(cluster)) { return res.serverError(200, 'Missing cluster', 'api.sessions.missingCluster'); }
+    if (!internals.remoteClusters || !internals.remoteClusters[cluster]) { return res.serverError(200, 'Unknown cluster', 'api.sessions.unknownCluster'); }
 
     const options = {
       user: req.user,
@@ -3479,11 +3492,11 @@ class SessionAPIs {
 
     const cluster = req.query.remoteCluster;
 
-    if (!ArkimeUtil.isString(req.query.saveId)) { return res.serverError(200, 'Missing saveId'); }
-    if (!ArkimeUtil.isString(cluster)) { return res.serverError(200, 'Missing cluster'); }
-    if (!internals.remoteClusters || !internals.remoteClusters[cluster]) { return res.serverError(200, 'Unknown cluster'); }
-    if (req.body.tags !== undefined && !ArkimeUtil.isString(req.body.tags, 0)) { return res.serverError(200, 'When present tags must be a string'); }
-    if (req.body.ids === undefined) { return res.serverError(200, 'Missing ids'); }
+    if (!ArkimeUtil.isString(req.query.saveId)) { return res.serverError(200, 'Missing saveId', 'api.sessions.missingSaveId'); }
+    if (!ArkimeUtil.isString(cluster)) { return res.serverError(200, 'Missing cluster', 'api.sessions.missingCluster'); }
+    if (!internals.remoteClusters || !internals.remoteClusters[cluster]) { return res.serverError(200, 'Unknown cluster', 'api.sessions.unknownCluster'); }
+    if (req.body.tags !== undefined && !ArkimeUtil.isString(req.body.tags, 0)) { return res.serverError(200, 'When present tags must be a string', 'api.sessions.tagsMustBeString'); }
+    if (req.body.ids === undefined) { return res.serverError(200, 'Missing ids', 'api.sessions.missingIds'); }
 
     let count = 0;
     const ids = ViewerUtils.queryValueToArray(req.body.ids);
@@ -3520,9 +3533,9 @@ class SessionAPIs {
   static sendSessions (req, res) {
     const cluster = req.body.remoteCluster;
 
-    if (!ArkimeUtil.isString(cluster)) { return res.serverError(200, 'Missing cluster'); }
-    if (!internals.remoteClusters || !internals.remoteClusters[cluster]) { return res.serverError(200, 'Unknown cluster'); }
-    if (req.body.tags !== undefined && !ArkimeUtil.isString(req.body.tags, 0)) { return res.serverError(200, 'When present tags must be a string'); }
+    if (!ArkimeUtil.isString(cluster)) { return res.serverError(200, 'Missing cluster', 'api.sessions.missingCluster'); }
+    if (!internals.remoteClusters || !internals.remoteClusters[cluster]) { return res.serverError(200, 'Unknown cluster', 'api.sessions.unknownCluster'); }
+    if (req.body.tags !== undefined && !ArkimeUtil.isString(req.body.tags, 0)) { return res.serverError(200, 'When present tags must be a string', 'api.sessions.tagsMustBeString'); }
 
     function sendResult(total) {
       return res.end(JSON.stringify({
@@ -3561,11 +3574,11 @@ class SessionAPIs {
    */
   static #saveIds = {};
   static receiveSession (req, res) {
-    if (!ArkimeUtil.isString(req.query.saveId)) { return res.serverError(200, 'Missing saveId'); }
+    if (!ArkimeUtil.isString(req.query.saveId)) { return res.serverError(200, 'Missing saveId', 'api.sessions.missingSaveId'); }
 
     req.query.saveId = req.query.saveId.replace(/[^-a-zA-Z0-9_]/g, '');
 
-    if (req.query.saveId.length === 0 || ArkimeUtil.isPP(req.query.saveId)) { return res.serverError(200, 'Bad saveId'); }
+    if (req.query.saveId.length === 0 || ArkimeUtil.isPP(req.query.saveId)) { return res.serverError(200, 'Bad saveId', 'api.sessions.badSaveId'); }
 
     let saveId = SessionAPIs.#saveIds[req.query.saveId];
     if (!saveId) {
@@ -3650,7 +3663,12 @@ class SessionAPIs {
 
       // If we know the session len and haven't read the session
       if (sessionlen !== -1 && !session && buffer.length >= sessionlen) {
-        session = JSON.parse(buffer.toString('utf8', 0, sessionlen));
+        try {
+          session = JSON.parse(buffer.toString('utf8', 0, sessionlen));
+        } catch (e) {
+          console.log('ERROR - could not parse session data in receiveSession', e);
+          return req.destroy();
+        }
         session.srcNode = session.node; // Save original node
         session.node = Config.nodeName();
         buffer = buffer.slice(sessionlen);

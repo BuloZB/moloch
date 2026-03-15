@@ -244,8 +244,7 @@ function newError (code, msg) {
 // ----------------------------------------------------------------------------
 class Parliament {
   static name;
-  static #esclient;
-  static #parliamentIndex;
+  static #implementation;
   static #cache = new LRUCache({ max: 1000, ttl: 1000 * 60 });
 
   static settingsDefault = {
@@ -265,38 +264,41 @@ class Parliament {
 
   static async initialize (options) {
     Parliament.name = options.name;
-    Parliament.#esclient = options.esclient;
 
-    const prefix = ArkimeUtil.formatPrefix(options.prefix);
+    const url = options.url ?? User.getDbUrl();
 
-    Parliament.#parliamentIndex = `${prefix}parliament`;
+    if (!url || url.startsWith('http')) {
+      Parliament.#implementation = new ParliamentESImplementation(options);
+    } else if (url.startsWith('lmdb')) {
+      Parliament.#implementation = new ParliamentLMDBImplementation({ ...options, url });
+    } else if (url.startsWith('redis')) {
+      Parliament.#implementation = new ParliamentRedisImplementation({ ...options, url });
+    } else if (url.startsWith('sqlite')) {
+      Parliament.#implementation = new ParliamentSQLiteImplementation({ ...options, url });
+    } else {
+      Parliament.#implementation = new ParliamentESImplementation(options);
+    }
   }
 
   // DB INTERACTIONS ---------------------------------------------------------
   static async getParliament () {
-    const parliament = await Parliament.#esclient.get({
-      index: Parliament.#parliamentIndex, id: Parliament.name
-    });
+    const parliament = await Parliament.#implementation.getParliament(Parliament.name);
 
-    Parliament.#cache.set('parliament', parliament.body._source);
+    if (parliament) {
+      Parliament.#cache.set('parliament', parliament);
+    }
 
     return parliament;
   }
 
   static async createParliament (parliament) {
-    return Parliament.#esclient.create({
-      index: Parliament.#parliamentIndex, body: parliament, id: Parliament.name, timeout: '10m'
-    });
+    return Parliament.#implementation.createParliament(Parliament.name, parliament);
   }
 
   static async setParliament (parliament) {
     try {
-      const response = await Parliament.#esclient.index({
-        index: Parliament.#parliamentIndex, body: parliament, id: Parliament.name, refresh: true, timeout: '10m'
-      });
-
+      await Parliament.#implementation.setParliament(Parliament.name, parliament);
       Parliament.#cache.set('parliament', parliament);
-      return response;
     } catch (err) {
       if (ArkimeConfig.debug) {
         console.log('Error setting parliament', err);
@@ -368,7 +370,7 @@ class Parliament {
    */
   static async apiGetParliament (req, res) {
     try {
-      const { body: { _source: parliament } } = await Parliament.getParliament();
+      const parliament = await Parliament.getParliament();
 
       const parliamentClone = JSON.parse(JSON.stringify(parliament));
 
@@ -395,7 +397,7 @@ class Parliament {
     }
 
     try {
-      const { body: { _source: parliament } } = await Parliament.getParliament();
+      const parliament = await Parliament.getParliament();
 
       // save general settings
       for (const s in req.body.settings.general) {
@@ -450,7 +452,7 @@ class Parliament {
 
   static async apiRestoreDefaultSettings (req, res, next) {
     try {
-      const { body: { _source: parliament } } = await Parliament.getParliament();
+      const parliament = await Parliament.getParliament();
 
       parliament.settings = Parliament.settingsDefault;
 
@@ -475,7 +477,7 @@ class Parliament {
    */
   static async apiUpdateParliamentOrder (req, res) {
     try {
-      const { body: { _source: parliament } } = await Parliament.getParliament();
+      const parliament = await Parliament.getParliament();
 
       if (isNaN(req.body.oldIdx) || isNaN(req.body.newIdx)) {
         return res.serverError(500, 'Error updating parliament order. Need old and new indexes!');
@@ -537,7 +539,7 @@ class Parliament {
     const newGroup = { title: req.body.title, description: req.body.description, id: uuid(), clusters: [] };
 
     try {
-      const { body: { _source: parliament } } = await Parliament.getParliament();
+      const parliament = await Parliament.getParliament();
       parliament.groups.push(newGroup);
 
       await Parliament.setParliament(parliament);
@@ -561,7 +563,7 @@ class Parliament {
    */
   static async apiDeleteGroup (req, res, next) {
     try {
-      const { body: { _source: parliament } } = await Parliament.getParliament();
+      const parliament = await Parliament.getParliament();
 
       let index = 0;
       let foundGroup = false;
@@ -609,7 +611,7 @@ class Parliament {
     }
 
     try {
-      const { body: { _source: parliament } } = await Parliament.getParliament();
+      const parliament = await Parliament.getParliament();
 
       let foundGroup = false;
       for (const group of parliament.groups) {
@@ -651,8 +653,8 @@ class Parliament {
       return res.serverError(422, 'A cluster must have a title.');
     }
 
-    if (!ArkimeUtil.isString(req.body.url)) {
-      return res.serverError(422, 'A cluster must have a url.');
+    if (!ArkimeUtil.isString(req.body.url) || !(req.body.url.startsWith('http') || req.body.url.startsWith('/'))) {
+      return res.serverError(422, 'A cluster must have a url that starts with http or /.');
     }
 
     if (req.body.description && !ArkimeUtil.isString(req.body.description)) {
@@ -661,6 +663,10 @@ class Parliament {
 
     if (req.body.localUrl && !ArkimeUtil.isString(req.body.localUrl)) {
       return res.serverError(422, 'A cluster must have a string localUrl.');
+    }
+
+    if (req.body.localUrl && !(req.body.localUrl.startsWith('http') || req.body.localUrl.startsWith('/'))) {
+      return res.serverError(422, 'A cluster localUrl must start with http or /.');
     }
 
     if (req.body.type && !ArkimeUtil.isString(req.body.type)) {
@@ -683,7 +689,7 @@ class Parliament {
     };
 
     try {
-      const { body: { _source: parliament } } = await Parliament.getParliament();
+      const parliament = await Parliament.getParliament();
 
       let foundGroup = false;
       for (const group of parliament.groups) {
@@ -720,7 +726,7 @@ class Parliament {
    */
   static async apiDeleteCluster (req, res, next) {
     try {
-      const { body: { _source: parliament } } = await Parliament.getParliament();
+      const parliament = await Parliament.getParliament();
 
       let clusterIndex = 0;
       let foundCluster = false;
@@ -767,8 +773,8 @@ class Parliament {
       return res.serverError(422, 'A cluster must have a title.');
     }
 
-    if (!ArkimeUtil.isString(req.body.url)) {
-      return res.serverError(422, 'A cluster must have a url.');
+    if (!ArkimeUtil.isString(req.body.url) || !(req.body.url.startsWith('http') || req.body.url.startsWith('/'))) {
+      return res.serverError(422, 'A cluster must have a url that starts with http or /.');
     }
 
     if (req.body.description && !ArkimeUtil.isString(req.body.description)) {
@@ -779,12 +785,16 @@ class Parliament {
       return res.serverError(422, 'A cluster must have a string localUrl.');
     }
 
+    if (req.body.localUrl && !(req.body.localUrl.startsWith('http') || req.body.localUrl.startsWith('/'))) {
+      return res.serverError(422, 'A cluster localUrl must start with http or /.');
+    }
+
     if (req.body.type && !ArkimeUtil.isString(req.body.type)) {
       return res.serverError(422, 'A cluster must have a string type.');
     }
 
     try {
-      const { body: { _source: parliament } } = await Parliament.getParliament();
+      const parliament = await Parliament.getParliament();
 
       let foundCluster = false;
       for (const group of parliament.groups) {
@@ -832,6 +842,124 @@ class Parliament {
    */
   static getGeneralSetting (type) {
     return Parliament.#cache.get('parliament')?.settings?.general[type] ?? Parliament.settingsDefault.general[type];
+  }
+}
+
+/******************************************************************************/
+// ES Implementation
+/******************************************************************************/
+class ParliamentESImplementation {
+  client;
+  parliamentIndex;
+
+  constructor (options) {
+    this.client = User.getClient();
+    const prefix = ArkimeUtil.formatPrefix(options.prefix);
+    this.parliamentIndex = `${prefix}parliament`;
+  }
+
+  async getParliament (pName) {
+    try {
+      const { body: { _source: doc } } = await this.client.get({
+        index: this.parliamentIndex, id: pName
+      });
+      return doc || null;
+    } catch (err) {
+      if (err.meta?.statusCode === 404) { return null; }
+      throw err;
+    }
+  }
+
+  async createParliament (pName, parliament) {
+    await this.client.create({
+      index: this.parliamentIndex, body: parliament, id: pName, timeout: '10m'
+    });
+  }
+
+  async setParliament (pName, parliament) {
+    await this.client.index({
+      index: this.parliamentIndex, body: parliament, id: pName, refresh: true, timeout: '10m'
+    });
+  }
+}
+
+/******************************************************************************/
+// LMDB Implementation
+/******************************************************************************/
+class ParliamentLMDBImplementation {
+  store;
+
+  constructor (options) {
+    this.store = ArkimeUtil.createLMDBStore(options.url, 'Parliament');
+  }
+
+  async getParliament (pName) {
+    const json = this.store.get(pName);
+    if (!json) { return null; }
+    return JSON.parse(json);
+  }
+
+  async createParliament (pName, parliament) {
+    await this.store.put(pName, JSON.stringify(parliament));
+  }
+
+  async setParliament (pName, parliament) {
+    await this.store.put(pName, JSON.stringify(parliament));
+  }
+}
+
+/******************************************************************************/
+// Redis Implementation
+/******************************************************************************/
+class ParliamentRedisImplementation {
+  client;
+  prefix = 'parliament:';
+
+  constructor (options) {
+    this.client = ArkimeUtil.createRedisClient(options.url, 'Parliament');
+  }
+
+  async getParliament (pName) {
+    const json = await this.client.get(this.prefix + pName);
+    if (!json) { return null; }
+    return JSON.parse(json);
+  }
+
+  async createParliament (pName, parliament) {
+    await this.client.set(this.prefix + pName, JSON.stringify(parliament));
+  }
+
+  async setParliament (pName, parliament) {
+    await this.client.set(this.prefix + pName, JSON.stringify(parliament));
+  }
+}
+
+/******************************************************************************/
+// SQLite Implementation
+/******************************************************************************/
+class ParliamentSQLiteImplementation {
+  db;
+
+  constructor (options) {
+    this.db = ArkimeUtil.createSQLiteDB(options.url);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS parliament (
+      name TEXT PRIMARY KEY,
+      json TEXT NOT NULL
+    )`);
+  }
+
+  async getParliament (pName) {
+    const row = this.db.prepare('SELECT json FROM parliament WHERE name = ?').get(pName);
+    if (!row) { return null; }
+    return JSON.parse(row.json);
+  }
+
+  async createParliament (pName, parliament) {
+    this.db.prepare('INSERT INTO parliament (name, json) VALUES (?, ?)').run(pName, JSON.stringify(parliament));
+  }
+
+  async setParliament (pName, parliament) {
+    this.db.prepare('INSERT OR REPLACE INTO parliament (name, json) VALUES (?, ?)').run(pName, JSON.stringify(parliament));
   }
 }
 
@@ -946,17 +1074,16 @@ function formatIssueMessage (cluster, issue) {
 }
 
 async function buildAlert (cluster, issue) {
-  const { body: notifiers } = await Notifier.searchNotifiers({ query: { match_all: {} } });
+  const notifiers = await Notifier.searchNotifiers({ all: true });
 
   // if there are no notifiers set, skip everything, there's nowhere to alert
-  if (notifiers.hits.total === 0) { return; }
+  if (notifiers.length === 0) { return; }
 
   issue.alerted = Date.now();
 
   const message = `${cluster.title} - ${issue.message}`;
 
-  for (const n in notifiers.hits.hits) {
-    const setNotifier = notifiers.hits.hits[n]._source;
+  for (const setNotifier of notifiers) {
 
     // keep looking for notifiers if the notifier is off
     if (!setNotifier || !setNotifier.on) { continue; }
@@ -972,7 +1099,7 @@ async function buildAlert (cluster, issue) {
       const field = setNotifier.fields.find(fd => fieldDef.name === fd.name);
       if (!field || (fieldDef.required && !field.value)) {
         // field doesn't exist, or field is required and doesn't have a value
-        console.log(`Missing the ${fieldDef.name} field for ${n} alerting. Add it on the settings page.`);
+        console.log(`Missing the ${fieldDef.name} field for ${setNotifier.name} alerting. Add it on the settings page.`);
         continue;
       }
       config[fieldDef.name] = field.value;
@@ -1001,26 +1128,29 @@ function findIssue (clusterId, issueType, node) {
 // Initializes the parliament with ids for each group and cluster
 // Upgrades the parliament if necessary
 async function initializeParliament () {
-  ArkimeUtil.checkArkimeSchemaVersion(User.getClient(), ArkimeConfig.get('usersPrefix'), MIN_DB_VERSION);
+  if (User.getClient()) {
+    ArkimeUtil.checkArkimeSchemaVersion(User.getClient(), ArkimeConfig.get('usersPrefix'), MIN_DB_VERSION);
+  }
   Notifier.initialize({
     issueTypes,
-    prefix: ArkimeConfig.get('usersPrefix'),
-    esclient: User.getClient()
+    prefix: ArkimeConfig.get('usersPrefix')
   });
 
   Parliament.initialize({
-    esclient: User.getClient(),
     name: internals.parliamentName,
     prefix: ArkimeConfig.get('usersPrefix')
   });
 
   // fetch parliament file if it exists
-  try {
-    parliamentFile = JSON.parse(fs.readFileSync(ArkimeConfig.get('file'), 'utf8'));
-  } catch (err) {
-    if (err.code !== 'ENOENT') {
-      console.log('Error reading parliament file:', err.message);
-      process.exit(1);
+  const parliamentFileName = ArkimeConfig.get('file');
+  if (parliamentFileName) {
+    try {
+      parliamentFile = JSON.parse(fs.readFileSync(parliamentFileName, 'utf8'));
+    } catch (err) {
+      if (err.code !== 'ENOENT') {
+        console.log('Error reading parliament file:', err.message);
+        process.exit(1);
+      }
     }
   }
 
@@ -1058,18 +1188,17 @@ async function initializeParliament () {
   // create parliament in db if it doesn't exist
   // (there was no parliament file to upgrade from)
   try {
-    await Parliament.getParliament();
-  } catch (err) {
-    if (err.meta?.statusCode === 404) {
+    const existing = await Parliament.getParliament();
+    if (!existing) {
       console.log('Parliament does not exist in DB. creating!');
       await Parliament.createParliament({
         groups: [],
         name: internals.parliamentName,
         settings: Parliament.settingsDefault
       });
-    } else {
-      console.error('ERROR - Error fetching Parliament', err);
     }
+  } catch (err) {
+    console.error('ERROR - Error fetching Parliament', err);
   }
 
   if (parliamentFile && parliamentFile.version < 7) {
@@ -1411,7 +1540,7 @@ async function getStats (cluster) {
 // this also sets all the issues in the issues.json file
 async function updateParliament () {
   internals.updateInProgress = true;
-  const { body: { _source: parliament } } = await Parliament.getParliament();
+  const parliament = await Parliament.getParliament();
 
   return new Promise((resolve, reject) => {
     const promises = [];
@@ -1698,7 +1827,8 @@ app.get('/parliament/api/issues', (req, res, next) => {
   });
 
   let type = 'string';
-  const sortBy = req.query.sort;
+  const allowedSortFields = { ignoreUntil: 1, firstNoticed: 1, lastNoticed: 1, acknowledged: 1, title: 1, text: 1, node: 1, cluster: 1, message: 1, severity: 1, type: 1, value: 1 };
+  const sortBy = allowedSortFields[req.query.sort] ? req.query.sort : undefined;
   if (sortBy === 'ignoreUntil' ||
     sortBy === 'firstNoticed' ||
     sortBy === 'lastNoticed' ||

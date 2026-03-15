@@ -78,7 +78,7 @@ app.use(compression());
 // Explicit sigint handler for running under docker
 // See https://github.com/nodejs/node/issues/4182
 process.on('SIGINT', function () {
-  process.exit();
+  process.exit(0);
 });
 
 // define csp headers
@@ -244,6 +244,19 @@ if (ArkimeConfig.regressionTests) {
     setTimeout(checkHuntFinished, 1000);
   });
   app.get('/regressionTests/deleteAllUsers', User.apiDeleteAllUsers);
+  app.get('/regressionTests/deleteAllNotifiers', Notifier.apiDeleteAllNotifiers);
+  app.get('/regressionTests/deleteAllViews', async (req, res) => {
+    await Db.deleteAllViews();
+    res.send('{}');
+  });
+  app.get('/regressionTests/deleteAllShortcuts', async (req, res) => {
+    await Db.deleteAllShortcuts();
+    res.send('{}');
+  });
+  app.get('/regressionTests/deleteAllShareables', async (req, res) => {
+    await Db.deleteAllShareables();
+    res.send('{}');
+  });
   app.get('/regressionTests/getUser/:user', (req, res) => {
     User.getUser(req.params.user, (err, user) => {
       // Shallow copy
@@ -284,8 +297,16 @@ app.use(async (req, res, next) => {
   if (req.url.match(/^\/receiveSession/i) || req.url.match(/^\/api\/sessions\/receive/i)) {
     if (req.headers['x-arkime-auth'] === undefined) {
       return res.status(401).send('receive session only allowed s2s');
-    } else {
+    }
+    try {
+      if (Config.get('s2sRegressionTests')) {
+        JSON.parse(req.headers['x-arkime-auth']);
+      } else {
+        Auth.auth2obj(req.headers['x-arkime-auth']);
+      }
       return next();
+    } catch (e) {
+      return res.status(401).send('receive session only allowed s2s');
     }
   }
 
@@ -516,7 +537,7 @@ function setCookie (req, res, next) {
 
 function checkCookieToken (req, res, next) {
   if (!req.headers['x-arkime-cookie']) {
-    return res.serverError(500, 'Missing token');
+    return res.serverError(500, 'Missing token', 'api.viewer.missingToken');
   }
 
   const cookie = req.headers['x-arkime-cookie'];
@@ -525,7 +546,7 @@ function checkCookieToken (req, res, next) {
   if (diff > 2400000 || /* req.token.pid !== process.pid || */
       req.token.userId !== req.user.userId) {
     console.trace('bad token', req.token, diff, req.token.userId, req.user.userId);
-    return res.serverError(500, 'Timeout - Please try reloading page and repeating the action');
+    return res.serverError(500, 'Timeout - Please try reloading page and repeating the action', 'api.viewer.sessionTimeout');
   }
 
   return next();
@@ -554,10 +575,10 @@ async function checkHuntAccess (req, res, next) {
         return next();
       }
 
-      return res.serverError(403, `You cannot change another user's hunt unless you have admin privileges`);
+      return res.serverError(403, `You cannot change another user's hunt unless you have admin privileges`, 'api.viewer.cannotChangeHunt');
     } catch (err) {
       console.log('ERROR - fetching hunt to check access', err);
-      return res.serverError(500, err);
+      return res.serverError(500, 'Error checking hunt access', 'api.viewer.checkHuntAccessError');
     }
   }
 }
@@ -572,7 +593,7 @@ function checkEsAdminUser (req, res, next) {
       return next();
     }
   }
-  return res.serverError(403, 'You do not have permission to access this resource');
+  return res.serverError(403, 'You do not have permission to access this resource', 'api.viewer.noPermission');
 }
 
 // log middleware -------------------------------------------------------------
@@ -723,7 +744,7 @@ function getSettingUserCache (req, res, next) {
   }
 
   // user is trying to get another user's settings without admin privilege
-  if (!req.user.hasRole('usersAdmin') || !req.user.hasRole('arkimeAdmin')) { return res.serverError(403, 'Need admin privileges'); }
+  if (!req.user.hasRole('usersAdmin') || !req.user.hasRole('arkimeAdmin')) { return res.serverError(403, 'Need admin privileges', 'api.viewer.needAdminPrivileges'); }
 
   User.getUserCache(req.query.userId, (err, user) => {
     if (err || !user) {
@@ -901,7 +922,12 @@ function sendSessionWorker (options, cb) {
           result += chunk;
         });
         pres.on('end', () => {
-          result = JSON.parse(result);
+          try {
+            result = JSON.parse(result);
+          } catch (e) {
+            console.log('ERROR - could not parse response from', url, result);
+            return cb();
+          }
           if (!result.success) {
             console.log('ERROR sending session ', result);
           }
@@ -967,7 +993,7 @@ async function expireDevice (nodes, dirs, minFreeSpaceG) {
   }
 
   if (Config.debug > 1) {
-    console.log('EXPIRE - device query', JSON.stringify(query, false, 2));
+    console.log('EXPIRE - device query', JSON.stringify(query, null, 2));
   }
 
   try {
@@ -982,7 +1008,7 @@ async function expireDevice (nodes, dirs, minFreeSpaceG) {
     if (Config.debug === 1) {
       console.log('EXPIRE - device results hits:', data.hits.hits.length);
     } else if (Config.debug > 1) {
-      console.log('EXPIRE - device results', data.hits.hits.length, JSON.stringify(data, false, 2));
+      console.log('EXPIRE - device results', data.hits.hits.length, JSON.stringify(data, null, 2));
     }
 
     if (data.hits.total <= 10) {
@@ -1025,7 +1051,7 @@ async function expireDevice (nodes, dirs, minFreeSpaceG) {
     return;
   } catch (err) {
     if (Config.debug > 0) {
-      console.log('EXPIRE - device error', JSON.stringify(err, false, 2));
+      console.log('EXPIRE - device error', JSON.stringify(err, null, 2));
     }
     return;
   }
@@ -1132,7 +1158,7 @@ app.all([
   if (!req.user.isDemoMode()) {
     return next();
   }
-  return res.serverError(403, 'Disabled in demo mode.');
+  return res.serverError(403, 'Disabled in demo mode.', 'api.viewer.disabledDemoMode');
 });
 
 // redirect to sessions page and conserve params
@@ -1935,9 +1961,9 @@ app.delete( // remove users from hunt endpoint
   HuntAPIs.removeUsers
 );
 
-app.get( // remote hunt endpoint
+app.get( // remote hunt endpoint - s2s only
   ['/api/hunt/:nodeName/:huntId/remote/:sessionId'],
-  [ArkimeUtil.noCacheJson],
+  [ArkimeUtil.noCacheJson, User.checkPermissions(['packetSearch'])],
   HuntAPIs.remoteHunt
 );
 
@@ -2033,7 +2059,7 @@ app.get(
 );
 
 app.get('/api/appversion', [ArkimeUtil.noCacheJson], (req, res) => {
-  return res.send({ app: 'viewer', version: version.version });
+  return res.send({ app: 'viewer', version: version.version, clusterName: internals.clusterName });
 });
 
 // cyberchef apis -------------------------------------------------------------
@@ -2154,7 +2180,7 @@ app.use(ArkimeUtil.expressErrorHandler);
 async function main () {
   if (!fs.existsSync(path.join(process.cwd(), '/views/mixins.pug'))) {
     console.error('ERROR - ./views/mixins.pug missing - The viewer app MUST be run from inside the viewer directory');
-    process.exit();
+    process.exit(1);
   }
 
   if (!fs.existsSync(path.join(__dirname, '/vueapp/dist/index.html')) && app.settings.env !== 'development') {
@@ -2224,7 +2250,7 @@ processArgs(process.argv);
 // DB
 // ============================================================================
 process.on('unhandledRejection', (reason, p) => {
-  console.trace('Unhandled Rejection at: Promise', p, 'reason:', reason, JSON.stringify(reason, false, 2));
+  console.trace('Unhandled Rejection at: Promise', p, 'reason:', reason, JSON.stringify(reason, null, 2));
   // application specific logging, throwing an error, or other logic here
 });
 
@@ -2260,8 +2286,7 @@ async function premain () {
   });
 
   Notifier.initialize({
-    prefix: Config.get('usersPrefix', Config.get('prefix', 'arkime')),
-    esclient: User.getClient()
+    prefix: Config.get('usersPrefix', Config.get('prefix', 'arkime'))
   });
 
   CronAPIs.initialize({

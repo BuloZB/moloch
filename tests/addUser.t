@@ -1,12 +1,10 @@
 # Test addUser.js and general authentication
-use Test::More tests => 74;
+use Test::More tests => 75;
 use Test::Differences;
 use Data::Dumper;
 use ArkimeTest;
 use JSON;
 use strict;
-
-clearIndex("tests_users");
 
 viewerGet("/regressionTests/deleteAllUsers");
 
@@ -206,7 +204,9 @@ is ($response->code, 403);
 
 # /receiveSession - good
 $response = $ArkimeTest::userAgent->post("http://$ArkimeTest::host:8126/receiveSession", ':x-arkime-auth' => '{"path": "/receiveSession", "user": "authtest2", "date": ' . time() * 1000 .'}');
-is ($response->content, '{"success":false,"text":"Missing saveId"}');
+my $rjson = from_json($response->content);
+is ($rjson->{success}, 0, "receiveSession missing saveId");
+is ($rjson->{i18n}, "api.sessions.missingSaveId", "receiveSession missing saveId i18n");
 is ($response->code, 200);
 
 # /users - bad
@@ -242,9 +242,9 @@ eq_or_diff($response, from_json('{"success": false, "text": "Bad path &#47;api&#
 $users = viewerPostToken("/api/users?arkimeRegressionUser=admin", "", $adminToken);
 is (@{$users->{data}}, 3, "Two supers left");
 
-clearIndex("tests_users");
+viewerGet("/regressionTests/deleteAllUsers");
 
 $users = viewerPost("/api/users", "");
-diag Dumper($users) if (@{$users->{data}} != 0);;
-is (@{$users->{data}}, 0, "Empty users table");
-clearIndex("tests_users");
+diag Dumper($users) if (@{$users->{data}} != 1);;
+is (@{$users->{data}}, 1, "Empty users table");
+viewerGet("/regressionTests/deleteAllUsers");

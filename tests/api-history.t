@@ -1,4 +1,4 @@
-use Test::More tests => 47;
+use Test::More tests => 53;
 use Cwd;
 use URI::Escape;
 use ArkimeTest;
@@ -68,11 +68,13 @@ my ($url) = @_;
 
 # Make sure can't request someone elses
     $json = get("/api/histories?arkimeRegressionUser=historytest2&userId=historytest1");
-    eq_or_diff($json, from_json('{"success": false, "text": "Need admin privileges"}'));
+    is($json->{success}, 0, "can't request someone else's history");
+    is($json->{i18n}, "api.history.needAdminPrivileges", "need admin privileges i18n");
 
 # Make sure can't request ours with wildcard
     $json = get("/api/histories?arkimeRegressionUser=historytest2&userId=historytest2*");
-    eq_or_diff($json, from_json('{"success": false, "text": "Need admin privileges"}'));
+    is($json->{success}, 0, "can't request with wildcard");
+    is($json->{i18n}, "api.history.needAdminPrivileges", "need admin privileges wildcard i18n");
 
 # An admin user should see everything, find it
     $json = viewerGet("/api/histories");
@@ -117,17 +119,25 @@ my ($url) = @_;
     $json = viewerGet("/api/histories?userId=historytest1&startTime=18000&stopTime=$pastHour");
     is ($json->{recordsFiltered}, 0, "Test5: recordsFiltered");
 
+# Should be able to filter by searchTerm
+    $json = viewerGet("/api/histories?searchTerm=domainwise");
+    is ($json->{recordsFiltered}, 1, "Test6: searchTerm match");
+    $json = viewerGet("/api/histories?searchTerm=zzznomatch");
+    is ($json->{recordsFiltered}, 0, "Test6: searchTerm no match");
+
 # Can't delete items when not admin
     $json = viewerDeleteToken("/api/history/$item->{id}?arkimeRegressionUser=historytest1", $otherToken);
     eq_or_diff($json, from_json('{"success": false, "text": "You do not have permission to access this resource"}', {relaxed => 1}), "Test Delete Not Admin", { context => 3 });
 
 # Delete item no index
     $json = viewerDeleteToken("/api/history/$item->{id}", $token);
-    eq_or_diff($json, from_json('{"success": false, "text": "Missing history index"}', {relaxed => 1}), "Test Delete No Index", { context => 3 });
+    is($json->{success}, 0, "Test Delete No Index");
+    is($json->{i18n}, "api.history.missingIndex", "Test Delete No Index i18n");
 
 # Delete item
     $json = viewerDeleteToken("/api/history/$item->{id}?index=$item->{index}", $token);
-    eq_or_diff($json, from_json('{"success": true, "text": "Deleted history item successfully"}', {relaxed => 1}), "Test Delete", { context => 3 });
+    is($json->{success}, 1, "Test Delete success");
+    is($json->{i18n}, "api.history.deletedSuccessfully", "Test Delete i18n");
     esGet("/_refresh");
 
 # Make sure gone

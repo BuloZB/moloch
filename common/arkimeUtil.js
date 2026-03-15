@@ -317,15 +317,37 @@ class ArkimeUtil {
     const { open } = require('lmdb');
 
     try {
-      const store = open({
+      const root = open({
         path: url.slice(7),
         compression: true
       });
-      return store;
+      if (section) {
+        return root.openDB(section);
+      }
+      return root;
     } catch (err) {
       console.log('ERROR -', err);
       process.exit(1);
     }
+  }
+
+  // ----------------------------------------------------------------------------
+  static createSQLiteDB (url) {
+    const Database = require('better-sqlite3');
+    let dbPath;
+    if (url.startsWith('sqlite3://')) {
+      dbPath = url.slice(10);
+    } else if (url.startsWith('sqlite://')) {
+      dbPath = url.slice(9);
+    } else {
+      dbPath = url;
+    }
+
+    const db = new Database(dbPath);
+    db.pragma('journal_mode = WAL');
+    db.pragma('synchronous = NORMAL');
+    db.pragma('busy_timeout = 5000');
+    return db;
   }
 
   // ----------------------------------------------------------------------------
@@ -365,14 +387,17 @@ class ArkimeUtil {
    * 3. sending a false success with message text (default "Server Error!")
    * @param {Number} [resStatus=403] - The response status code (optional)
    * @param {String} [text="Server Error!"] - The response text (optional)
+   * @param {String} [i18n] - The i18n translation key (optional)
+   * @param {Object} [i18nParams] - The i18n translation parameters (optional)
    * @returns {Object} res - The Express.js response object
    */
-  static serverError (resStatus, text) {
+  static serverError (resStatus, text, i18n, i18nParams) {
     this.status(resStatus || 403);
     this.setHeader('Content-Type', 'application/json');
-    return this.send(
-      { success: false, text: text || 'Server Error!' }
-    );
+    const body = { success: false, text: text || 'Server Error!' };
+    if (i18n) { body.i18n = i18n; }
+    if (i18nParams) { body.i18nParams = i18nParams; }
+    return this.send(body);
   }
 
   // ----------------------------------------------------------------------------
