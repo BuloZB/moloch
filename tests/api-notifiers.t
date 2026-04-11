@@ -1,4 +1,4 @@
-use Test::More tests => 59;
+use Test::More tests => 77;
 use Cwd;
 use URI::Escape;
 use ArkimeTest;
@@ -20,6 +20,8 @@ viewerGet("/regressionTests/deleteAllNotifiers");
   my $notifierTypes = viewerGetToken("/api/notifiertypes", $token);
   ok(exists $notifierTypes->{email}, "email notifier exists");
   ok(exists $notifierTypes->{slack}, "slack notifier exists");
+  ok(exists $notifierTypes->{snmp}, "snmp notifier exists");
+  ok(exists $notifierTypes->{syslog}, "syslog notifier exists");
   ok(exists $notifierTypes->{twilio}, "twilio notifier exists");
 
 # empty notifiers
@@ -155,6 +157,53 @@ viewerGet("/regressionTests/deleteAllNotifiers");
   is (@{$notifiers}, 2, "2 notifiers shared with sac-notadmin user (one by user sharing and one by role sharing)");
   is (${notifiers}->[0]->{name}, "test3", 'can see notifier shared by users');
   is (${notifiers}->[1]->{name}, "test4", 'can see notifier shared by roles');
+
+# syslog notifier - missing required fields
+  $json = viewerPostToken("/api/notifier", '{"name":"syslog1","type":"syslog","fields":[]}', $token);
+  is($json->{text}, "Missing a value for host", "syslog missing host");
+  $json = viewerPostToken("/api/notifier", '{"name":"syslog1","type":"syslog","fields":[{"name":"host","value":"localhost"}]}', $token);
+  is($json->{text}, "Missing a value for port", "syslog missing port");
+  $json = viewerPostToken("/api/notifier", '{"name":"syslog1","type":"syslog","fields":[{"name":"host","value":"localhost"},{"name":"port","value":"514"}]}', $token);
+  is($json->{text}, "Missing a value for protocol", "syslog missing protocol");
+
+# syslog notifier - create success
+  $json = viewerPostToken("/api/notifier", '{"name":"syslog1","type":"syslog","fields":[{"name":"host","value":"localhost"},{"name":"port","value":"514"},{"name":"protocol","value":"udp"}]}', $token);
+  ok($json->{success}, "syslog notifier create success");
+  my $syslogId = $json->{notifier}->{id};
+  is($json->{notifier}->{type}, "syslog", "syslog notifier type");
+
+# syslog notifier - update
+  $json = viewerPutToken("/api/notifier/$syslogId", '{"name":"syslog1a","type":"syslog","fields":[{"name":"host","value":"syslog.example.com"},{"name":"port","value":"6514"},{"name":"protocol","value":"tls"},{"name":"facility","value":"local1"},{"name":"severity","value":"err"},{"name":"tag","value":"parliament"}]}', $token);
+  ok($json->{success}, "syslog notifier update success");
+  is($json->{notifier}->{name}, "syslog1a", "syslog notifier name updated");
+
+# cleanup
+  $json = viewerDeleteToken("/api/notifier/$syslogId", $token);
+  ok($json->{success}, "syslog notifier delete success");
+
+# snmp notifier - missing required fields
+  $json = viewerPostToken("/api/notifier", '{"name":"snmp1","type":"snmp","fields":[]}', $token);
+  is($json->{text}, "Missing a value for host", "snmp missing host");
+
+# snmp notifier - create success (v2c)
+  $json = viewerPostToken("/api/notifier", '{"name":"snmp1","type":"snmp","fields":[{"name":"host","value":"localhost"},{"name":"community","value":"public"}]}', $token);
+  ok($json->{success}, "snmp notifier create success");
+  my $snmpId = $json->{notifier}->{id};
+  is($json->{notifier}->{type}, "snmp", "snmp notifier type");
+
+# snmp notifier - update with v1 fields
+  $json = viewerPutToken("/api/notifier/$snmpId", '{"name":"snmp1a","type":"snmp","fields":[{"name":"host","value":"trap.example.com"},{"name":"port","value":"1162"},{"name":"community","value":"private"},{"name":"version","value":"1"},{"name":"trapOid","value":"1.3.6.1.4.1.12345.1"}]}', $token);
+  ok($json->{success}, "snmp notifier update success");
+  is($json->{notifier}->{name}, "snmp1a", "snmp notifier name updated");
+
+# snmp notifier - update with v3 fields
+  $json = viewerPutToken("/api/notifier/$snmpId", '{"name":"snmp1v3","type":"snmp","fields":[{"name":"host","value":"trap.example.com"},{"name":"version","value":"3"},{"name":"v3User","value":"myuser"},{"name":"v3AuthProtocol","value":"sha"},{"name":"v3AuthKey","value":"authpass1"},{"name":"v3PrivProtocol","value":"aes"},{"name":"v3PrivKey","value":"privpass1"}]}', $token);
+  ok($json->{success}, "snmp v3 notifier update success");
+  is($json->{notifier}->{name}, "snmp1v3", "snmp v3 notifier name updated");
+
+# cleanup
+  $json = viewerDeleteToken("/api/notifier/$snmpId", $token);
+  ok($json->{success}, "snmp notifier delete success");
 
 # cleanup
   $json = viewerDeleteToken("/api/notifier/badid", $token);

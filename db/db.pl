@@ -82,6 +82,7 @@
 # 83 - added files sessionsStarted, sessionsPresent
 # 84 - added shareables index
 # 85 - added packetRange field to sessions
+# 86 - added totpSecret field to users
 
 use HTTP::Request::Common;
 use LWP::UserAgent;
@@ -95,7 +96,7 @@ use URI;
 use strict;
 use warnings;
 
-my $VERSION = 85;
+my $VERSION = 86;
 my $verbose = 0;
 my $PREFIX = $ENV{ARKIME_default__prefix} || $ENV{ARKIME__prefix};
 my $OLDPREFIX = "";
@@ -104,6 +105,7 @@ my $CLIENTCERT = "";
 my $CLIENTKEY = "";
 my $NOCHANGES = 0;
 my $SHARDS = -1;
+my $COMPRESSION;
 my $REPLICAS = -1;
 my $HISTORY = 13;
 my $SEGMENTS = 1;
@@ -180,6 +182,7 @@ sub showHelp($)
     print "    --ilm                      - Use ilm (Elasticsearch) to manage\n";
     print "    --ism                      - Use ism (OpenSearch) to manage\n";
     print "    --ifneeded                 - Only init or upgrade if needed, otherwise just exit\n";
+    print "    --compression <mode>       - The compression codec\n";
     print "  wipe [<init opts>]           - Same as init, but leaves configs,user,views,parliament indices untouched\n";
     print "  clean                        - Remove all Arkime indices\n";
     print "  upgrade [<init opts>]        - Upgrade Arkime's mappings from a previous version or use to change settings\n";
@@ -6194,6 +6197,11 @@ if ($DOILM) {
       "lifecycle.name": "${PREFIX}molochsessions"/;
 }
 
+if ($COMPRESSION) {
+  $settings .= qq/,
+      "codec": "${COMPRESSION}"/;
+}
+
     my $template = qq(
 {
   "index_patterns": "${PREFIX}sessions3-*",
@@ -6976,6 +6984,9 @@ sub usersUpdate
     "passStore": {
       "type": "keyword"
     },
+    "totpSecret": {
+      "type": "keyword"
+    },
     "expression": {
       "type": "keyword"
     },
@@ -7400,6 +7411,9 @@ sub parseArgs {
         } elsif ($ARGV[$pos] eq "--description") {
             $pos++;
             $DESCRIPTION = $ARGV[$pos];
+        } elsif ($ARGV[$pos] eq "--compression") {
+            $pos++;
+            $COMPRESSION = $ARGV[$pos];
         } else {
             logmsg "Unknown option '$ARGV[$pos]'\n";
         }
@@ -7437,6 +7451,15 @@ sub checkPreviousSettings {
                 int($stemplate->{settings}->{"index.routing.allocation.total_shards_per_node"}),
                 $shardsPerNode,
                 int($stemplate->{settings}->{"index.routing.allocation.total_shards_per_node"});
+        $needNewline = 1;
+    }
+
+    if (!defined $stemplate->{settings}->{"index.codec"}) {
+    } elsif (!defined $COMPRESSION || $COMPRESSION ne $stemplate->{settings}->{"index.codec"}) {
+        printf "WARNING: Previous compression was %s, you are changing to %s. For old behaviour add:  --compression %s\n",
+                $stemplate->{settings}->{"index.codec"},
+                !defined $COMPRESSION ? "default" : $COMPRESSION,
+                $stemplate->{settings}->{"index.codec"};
         $needNewline = 1;
     }
 
@@ -9488,11 +9511,17 @@ if ($ARGV[1] =~ /^(init|wipe|clean)/) {
         filesUpdate();
         fields82Fix();
         shareablesCreate();
+        usersUpdate();
     } elsif ($main::versionNumber <= 85) {
         checkForOld7Indices();
         sessions3Update();
         historyUpdate();
         shareablesUpdate();
+        usersUpdate();
+    } elsif ($main::versionNumber <= 86) {
+        checkForOld7Indices();
+        sessions3Update();
+        historyUpdate();
     } else {
         logmsg "db.pl is hosed\n";
     }
