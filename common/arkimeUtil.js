@@ -21,6 +21,7 @@ const logger = require('morgan');
 const express = require('express');
 const ini = require('js-ini');
 const acorn = require('acorn');
+const RE2 = require('re2');
 
 class ArkimeUtil {
   static adminRole;
@@ -172,8 +173,8 @@ class ArkimeUtil {
   // ----------------------------------------------------------------------------
   /**
    * Create a redis client from the provided url
-   * @params {string} url - The redis url to connect to.
-   * @params {string} section - The section this redis client is being created for
+   * @param {string} url - The redis url to connect to.
+   * @param {string} section - The section this redis client is being created for
    */
   static createRedisClient (url, section) {
     url = ArkimeUtil.sanitizeStr(url);
@@ -205,10 +206,10 @@ class ArkimeUtil {
         options.sentinels.push({ host: hostport[0], port: hostport[1] || 26379 });
       }
 
-      if (match[3] !== '') {
+      if (match[3]) {
         options.sentinelPassword = match[3];
       }
-      if (match[4] !== '') {
+      if (match[4]) {
         options.password = match[4];
       }
 
@@ -233,7 +234,7 @@ class ArkimeUtil {
       }
 
       const options = { db: parseInt(match[5]) };
-      if (match[3] !== '') {
+      if (match[3]) {
         options.password = match[3];
       }
 
@@ -289,8 +290,8 @@ class ArkimeUtil {
   // ----------------------------------------------------------------------------
   /**
    * Create a memcached client from the provided url
-   * @params {string} url - The memcached url to connect to.
-   * @params {string} section - The section this memcached client is being created for
+   * @param {string} url - The memcached url to connect to.
+   * @param {string} section - The section this memcached client is being created for
    */
   static createMemcachedClient (url, section) {
     url = ArkimeUtil.sanitizeStr(url);
@@ -309,8 +310,8 @@ class ArkimeUtil {
   // ----------------------------------------------------------------------------
   /**
    * Create a LMDB store from the provided url
-   * @params {string} url - The LMDB url to connect to.
-   * @params {string} section - The section this LMDB client is being created for
+   * @param {string} url - The LMDB url to connect to.
+   * @param {string} section - The section this LMDB client is being created for
    */
   static createLMDBStore (url, section) {
     // eslint-disable-next-line no-shadow
@@ -354,7 +355,7 @@ class ArkimeUtil {
   static wildcardToRegexp (wildcard) {
     // https://stackoverflow.com/revisions/57527468/5
     wildcard = wildcard.replace(/[.+^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(`^${wildcard.replace(/\*/g, '.*').replace(/\?/g, '.')}$`, 'i');
+    return new RE2(`^${wildcard.replace(/\*/g, '.*').replace(/\?/g, '.')}$`, 'i');
   }
 
   // ----------------------------------------------------------------------------
@@ -424,7 +425,7 @@ class ArkimeUtil {
     if (res.headersSent) {
       return next(err);
     }
-    res.status(500).send(err.toString());
+    res.status(500).type('text/plain').send(err.toString());
   }
 
   // ----------------------------------------------------------------------------
@@ -511,7 +512,7 @@ class ArkimeUtil {
 
   // ----------------------------------------------------------------------------
   /**
-   * Callback when of the cert files change
+   * Callback when one of the cert files changes
    */
   static #fsWait;
   static #httpsServer;

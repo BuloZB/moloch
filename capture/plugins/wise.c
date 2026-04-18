@@ -512,6 +512,8 @@ LOCAL void wise_lookup_domain(ArkimeSession_t *session, WiseRequest_t *request, 
         if (config.debug) {
             LOG("Invalid DNS: %s", domain);
         }
+        if (colon)
+            *colon = ':';
         return;
     }
 
@@ -521,6 +523,8 @@ LOCAL void wise_lookup_domain(ArkimeSession_t *session, WiseRequest_t *request, 
         if (inet_pton(AF_INET, domain, &addr) == 1) {
             wise_lookup(session, request, domain, INTEL_TYPE_IP, matchPos);
         }
+        if (colon)
+            *colon = ':';
         return;
     }
 
@@ -553,6 +557,9 @@ LOCAL void wise_lookup_ip(ArkimeSession_t *session, WiseRequest_t *request, stru
 /******************************************************************************/
 LOCAL void wise_lookup_tuple(ArkimeSession_t *session, WiseRequest_t *request)
 {
+    if (!session->fields[protocolField])
+        return;
+
     char    str[1000];
     BSB     bsb;
 

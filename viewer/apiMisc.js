@@ -98,7 +98,7 @@ class MiscAPIs {
    *
    * Gets a list of PCAP files that Arkime knows about.
    * @name /files
-   * @param {number} length=100 - The number of items to return. Defaults to 500, Max is 10,000
+   * @param {number} length=10 - The number of items to return. Defaults to 10, Max is 10,000
    * @param {number} start=0 - The entry to start at. Defaults to 0
    * @returns {Array} data - The list of files
    * @returns {number} recordsTotal - The total number of files Arkime knows about
@@ -133,7 +133,7 @@ class MiscAPIs {
 
       const results = { total: files.hits.total, results: [] };
       for (const file of files.hits.hits) {
-        const fields = file._source || files.fields;
+        const fields = file._source || file.fields;
         if (fields.locked === undefined) {
           fields.locked = 0;
         }
@@ -434,7 +434,7 @@ class MiscAPIs {
       res.send({ data });
     } catch (err) {
       console.log(`ERROR - ${req.method} /%s/session/%s/cyberchef`, ArkimeUtil.sanitizeStr(req.params.nodeName), ArkimeUtil.sanitizeStr(req.params.id), util.inspect(err, false, 50));
-      return res.end('Error - ' + err);
+      return res.type('text/plain').end('Error - ' + err);
     }
   }
 

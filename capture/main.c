@@ -400,13 +400,14 @@ LOCAL void arkime_free_later_init()
 /******************************************************************************/
 LOCAL void controlc(int UNUSED(sig))
 {
-    LOG("Control-C");
     signal(SIGINT, exit); // Double Control-C quits right away
+    LOG("Control-C");
     arkime_quit();
 }
 /******************************************************************************/
 LOCAL void terminate(int UNUSED(sig))
 {
+    signal(SIGTERM, exit); // Double terminate quits right away
     LOG("Terminate");
     arkime_quit();
 }
@@ -455,10 +456,10 @@ void arkime_check_file_permissions(const char *filename)
 
             if (stats.st_mode & S_IROTH) {
                 // world readable
-            } else if ((stats.st_mode & S_IRGRP) && config.dropGroup && (strcmp (config.dropGroup, gr->gr_name) == 0)) {
+            } else if ((stats.st_mode & S_IRGRP) && config.dropGroup && gr && (strcmp (config.dropGroup, gr->gr_name) == 0)) {
                 // group readable and dropGroup matches file group
                 // TODO compare group id values as opposed to group name
-            } else if ((stats.st_mode & S_IRUSR) && config.dropUser && (strcmp (config.dropUser, pw->pw_name) == 0)) {
+            } else if ((stats.st_mode & S_IRUSR) && config.dropUser && pw && (strcmp (config.dropUser, pw->pw_name) == 0)) {
                 // user readable and dropUser matches file user
                 // TODO compare user id values as opposed to user name
             } else
@@ -608,13 +609,11 @@ SUPPRESS_UNSIGNED_INTEGER_OVERFLOW
 uint32_t arkime_string_hash(const void *key)
 {
     const uint8_t *p = (uint8_t *)key;
-    uint32_t n = 0;
+    uint32_t n = hashSalt;
     while (*p) {
         n = (n << 5) - n + *p;
         p++;
     }
-
-    n ^= hashSalt;
 
     return n;
 }
@@ -623,14 +622,12 @@ SUPPRESS_UNSIGNED_INTEGER_OVERFLOW
 uint32_t arkime_string_hash_len(const void *key, int len)
 {
     const uint8_t *p = (uint8_t *)key;
-    uint32_t n = 0;
+    uint32_t n = hashSalt;
     while (len) {
         n = (n << 5) - n + *p;
         p++;
         len--;
     }
-
-    n ^= hashSalt;
 
     return n;
 }

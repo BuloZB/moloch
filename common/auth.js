@@ -1,5 +1,5 @@
 /******************************************************************************/
-/* auth.js  -- common Auth apis
+/* auth.js  -- common Auth APIs
  *
  * Copyright Yahoo Inc.
  *
@@ -200,7 +200,7 @@ class Auth {
           process.exit(1);
         }
       }
-    } else if (Auth.mode === 'header') {
+    } else if (Auth.mode === 'header' || Auth.mode === 'header-jwt') {
       Auth.#userAuthIps.add('::ffff:127.0.0.0', 96 + 8, 1);
       Auth.#userAuthIps.add('::1', 128, 1);
     } else {
@@ -209,8 +209,8 @@ class Auth {
 
     function check (field, str) {
       if (!ArkimeUtil.isString(Auth.#authConfig[field])) {
-        console.log(`ERROR - ${str} missing from config file`);
-        process.exit();
+        console.log(`ERROR - ${str ?? field} missing from config file`);
+        process.exit(1);
       }
     }
 
@@ -259,6 +259,10 @@ class Auth {
     case 'header+basic':
       Auth.#strategies = ['header', 'basic'];
       break;
+    case 'header-jwt':
+      check('userIdField', 'authUserIdField');
+      Auth.#strategies = ['header'];
+      break;
     case 's2s':
       Auth.#strategies = ['s2s'];
       break;
@@ -293,7 +297,7 @@ class Auth {
         name: 'ARKIME-SID',
         secret: Auth.passwordSecret + Auth.#serverSecret,
         resave: false,
-        saveUninitialized: true,
+        saveUninitialized: false,
         cookie: { path: Auth.#basePath, secure: Auth.#authConfig.cookieSecure, sameSite: Auth.#authConfig.cookieSameSite ?? 'Lax', maxAge: 24 * 60 * 60 * 1000, httpOnly: true },
         store: new ESStore({ })
       }));
@@ -308,10 +312,13 @@ class Auth {
           res.sendFile(path.join(__dirname, '../assets/Arkime_Logo_Mark_FullGradient.png'));
         });
 
+        let formHtmlTemplate;
         Auth.#authRouter.get('/auth', (req, res) => {
           // User is not authenticated, show the login form
-          let html = fs.readFileSync(path.join(__dirname, '/vueapp/formAuth.html'), 'utf-8');
-          html = html.toString().replace(/@@BASEHREF@@/g, Auth.#basePath)
+          if (!formHtmlTemplate) {
+            formHtmlTemplate = fs.readFileSync(path.join(__dirname, '/vueapp/formAuth.html'), 'utf-8');
+          }
+          const html = formHtmlTemplate.replace(/@@BASEHREF@@/g, Auth.#basePath)
             .replace(/@@MESSAGE@@/g, ArkimeConfig.get('loginMessage', ''))
             .replace(/@@OGURL@@/g, req.session.ogurl ?? Auth.#basePath);
           return res.send(html);
@@ -378,7 +385,7 @@ class Auth {
       logoutUrl = logoutUrl.replace('ARKIME_ID_TOKEN', req.session.id_token);
     }
     if (ArkimeConfig.debug > 0) {
-      console.log('Set logoutUrl to', req.user.userId, '=>', Auth.#logoutUrl);
+      console.log('Set logoutUrl to', req.user.userId, '=>', logoutUrl);
     }
     return logoutUrl;
   }
@@ -548,8 +555,30 @@ class Auth {
         }
       }
 
-      const userId = req.headers[Auth.#userNameHeader].trim();
-      if (userId === '') {
+      let userId;
+      let vals = req.headers;
+
+      if (Auth.mode === 'header-jwt') {
+        // No signature verification — the upstream proxy (ALB, Cloudflare Access, etc.)
+        // has already verified the JWT before forwarding the request.
+        try {
+          const jwt = req.headers[Auth.#userNameHeader];
+          const parts = jwt.split('.');
+          if (parts.length !== 3) {
+            return done('Invalid JWT in header');
+          }
+          const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
+          userId = payload[Auth.#authConfig.userIdField]?.toString().trim();
+          vals = payload;
+        } catch (e) {
+          console.log('AUTH: Failed to decode JWT from header', Auth.#userNameHeader, e.message);
+          return done('Failed to decode JWT');
+        }
+      } else {
+        userId = req.headers[Auth.#userNameHeader].trim();
+      }
+
+      if (!userId || userId === '') {
         return done('User name header is empty');
       }
 
@@ -562,7 +591,7 @@ class Auth {
         if (!user.enabled) { return done('User not enabled'); }
         if (!user.headerAuthEnabled) { return done('User header auth not enabled'); }
 
-        await user.updateDynamicRoles(req.headers);
+        await user.updateDynamicRoles(vals);
         user.setLastUsed();
         return done(null, user);
       }
@@ -571,7 +600,7 @@ class Auth {
         if (Auth.#userAutoCreateTmpl === undefined && Auth.#userAutoCreateFuncs === undefined) {
           return headerAuthCheck(err, user);
         } else if ((err && err.toString().includes('Not Found')) || (!user)) { // Try dynamic creation
-          Auth.#dynamicCreate(userId, req.headers, headerAuthCheck);
+          Auth.#dynamicCreate(userId, vals, headerAuthCheck);
         } else {
           return headerAuthCheck(err, user);
         }
@@ -846,11 +875,19 @@ class Auth {
       return ArkimeUtil.serverError.call(res, 403, 'Bad path ' + ArkimeUtil.safeStr(req.path));
     }
 
-    if (!req.query) { return next(); }
+    if (req.query) {
+      for (const key in req.query) {
+        if (ArkimeUtil.isPP(req.query[key])) {
+          return ArkimeUtil.serverError.call(res, 403, 'Invalid value for ' + ArkimeUtil.safeStr(key));
+        }
+      }
+    }
 
-    for (const key in req.query) {
-      if (ArkimeUtil.isPP(req.query[key])) {
-        return ArkimeUtil.serverError.call(res, 403, 'Invalid value for ' + ArkimeUtil.safeStr(key));
+    if (req.body) {
+      for (const key in req.body) {
+        if (ArkimeUtil.isPP(req.body[key])) {
+          return ArkimeUtil.serverError.call(res, 403, 'Invalid value for ' + ArkimeUtil.safeStr(key));
+        }
       }
     }
 
@@ -919,6 +956,9 @@ class Auth {
           }
           return res.redirect(Auth.#basePath);
         } else if (req._parsedUrl.pathname === '/auth/logout/callback') {
+          if (ArkimeConfig.debug > 0) {
+            console.log('AUTH - logout callback from', req.user?.userId, req.ip);
+          }
         }
         return next();
       }
@@ -1221,7 +1261,7 @@ class ESStore extends expressSession.Store {
       });
     } catch (err) {
       // If already exists ignore error
-      if (err.meta.body?.error?.type !== 'resource_already_exists_exception') {
+      if (err.meta?.body?.error?.type !== 'resource_already_exists_exception') {
         console.log(err);
         process.exit(1);
       }

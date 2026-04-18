@@ -167,6 +167,12 @@ function getActiveNodes (clusterin) {
 
 function makeRequest (url, options, cb) {
   let result = '';
+  let called = false;
+  const done = (err, res) => {
+    if (called) { return; }
+    called = true;
+    if (cb) { cb(err, res); }
+  };
 
   const preq = options.arkime_client.request(url, options, (pres) => {
     pres.on('data', (chunk) => {
@@ -182,14 +188,16 @@ function makeRequest (url, options, cb) {
           result = JSON.parse(result);
         } catch (e) {
           console.log('ERROR - could not parse response from ES', e);
-          if (cb) { return cb(e, {}); }
+          return done(e, {});
         }
       } else {
         result = {};
       }
-      if (cb) {
-        cb(null, result);
-      }
+      done(null, result);
+    });
+    pres.on('error', (e) => {
+      console.log('Response error', e);
+      done(e, {});
     });
   });
   preq.setHeader('content-type', 'application/json');
@@ -204,6 +212,7 @@ function makeRequest (url, options, cb) {
   }
   preq.on('error', (e) => {
     console.log('Request error', e);
+    done(e, {});
   });
   preq.end();
 }
@@ -375,7 +384,12 @@ function simpleGather1Cluster (req, res) {
 
   // Remove cluster from body if there
   if (req._body) {
-    const body = JSON.parse(req.body);
+    let body;
+    try {
+      body = JSON.parse(req.body);
+    } catch (e) {
+      return res.status(400).send({ error: 'Invalid JSON body' });
+    }
     delete body.cluster;
     req.body = JSON.stringify(body);
   }
@@ -838,7 +852,7 @@ function fixQuery (node, body, doneCb) {
 
   let outstanding = 0;
   let finished = 0;
-  const err = null;
+  let outerErr = null;
 
   function convert (qParent, obj) {
     for (const item in obj) {
@@ -870,10 +884,10 @@ function fixQuery (node, body, doneCb) {
           obj.bool.should.push({ bool: { filter: [{ term: { node: file._source.node } }, { term: { fileId: file._source.num } }] } });
         }
         if (obj.bool.should.length === 0) {
-          err = 'No matching files found';
+          outerErr = 'No matching files found';
         }
         if (finished && outstanding === 0) {
-          doneCb(err, body);
+          doneCb(outerErr, body);
         }
       });
     } else if (typeof obj[item] === 'object') {
@@ -883,7 +897,7 @@ function fixQuery (node, body, doneCb) {
 
   convert(null, body);
   if (outstanding === 0) {
-    return doneCb(err, body);
+    return doneCb(outerErr, body);
   }
 
   finished = 1;
@@ -1051,7 +1065,7 @@ app.post(['/:index/:type/_search', '/:index/_search'], function (req, res) {
   try {
     search = JSON.parse(req.body);
   } catch (e) {
-    return res.status(400).send('Invalid JSON body');
+    return res.status(400).send({ error: 'Invalid JSON body' });
   }
 
   if (+search.size + (+search.from || 0) > 10000) {
@@ -1147,7 +1161,12 @@ function msearch (req, res) {
 }
 
 app.post(['/:index/:type/:id/_update', '/:index/_update/:id'], async (req, res) => {
-  const body = JSON.parse(req.body);
+  let body;
+  try {
+    body = JSON.parse(req.body);
+  } catch (e) {
+    return res.status(400).send({ error: 'Invalid JSON body' });
+  }
   const cluster = req.query.cluster ?? body.cluster;
   if (cluster && clusters[cluster]) {
     const node = clusters[cluster];

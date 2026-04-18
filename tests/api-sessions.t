@@ -1,4 +1,4 @@
-use Test::More tests => 135;
+use Test::More tests => 159;
 use Cwd;
 use URI::Escape;
 use ArkimeTest;
@@ -8,6 +8,7 @@ use Data::Dumper;
 use strict;
 
 my $pwd = "*/pcap";
+my $token = getTokenCookie();
 
 sub testMulti {
     my ($json, $mjson, $url) = @_;
@@ -287,15 +288,15 @@ tcp,1386004309468,1386004309478,10.180.156.185,53533,US,10.180.156.249,1080,US,2
     is($json->{i18n}, "api.sessions.missingIds", "send sessions missing ids i18n");
 
 # Test errors for /api/sessions/send
-    $json = viewerPost("/api/sessions/send", '');
+    $json = viewerPostToken("/api/sessions/send", '', $token);
     is($json->{success}, 0, "send all missing cluster");
     is($json->{i18n}, "api.sessions.missingCluster", "send all missing cluster i18n");
 
-    $json = viewerPost("/api/sessions/send", "cluster=unknown");
+    $json = viewerPostToken("/api/sessions/send", "wrongparam=unknown", $token);
     is($json->{success}, 0, "send all cluster param missing cluster");
     is($json->{i18n}, "api.sessions.missingCluster", "send all cluster param missing cluster i18n");
 
-    $json = viewerPost("/api/sessions/send", "remoteCluster=unknown");
+    $json = viewerPostToken("/api/sessions/send", "remoteCluster=unknown", $token);
     is($json->{success}, 0, "send all unknown cluster");
     is($json->{i18n}, "api.sessions.unknownCluster", "send all unknown cluster i18n");
 
@@ -322,3 +323,64 @@ tcp,1386004309468,1386004309478,10.180.156.185,53533,US,10.180.156.249,1080,US,2
 # Test /api/sessions/decodings
     $json = viewerGet("/api/sessions/decodings");
     ok(ref $json eq 'HASH', "decodings returns an object");
+
+# unique with bad view should return error as text/plain
+    my $resp = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8123/api/unique?field=source.ip&view=unknown&date=-1&expression=" . uri_escape("file=$pwd/socks-http-example.pcap"));
+    like ($resp->content, qr/Can't find view/, "unique bad view error text");
+    is ($resp->header('Content-Type'), 'text/plain; charset=utf-8', "unique bad view content-type");
+
+# multiunique with unknown expression field should return error as text/plain
+    $resp = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8123/api/multiunique?exp=FAKEFIELD&date=-1&expression=" . uri_escape("file=$pwd/socks-http-example.pcap"));
+    like ($resp->content, qr/Unknown expression FAKEFIELD/, "multiunique bad field error text");
+    is ($resp->header('Content-Type'), 'text/plain; charset=utf-8', "multiunique bad field content-type");
+
+# multiunique with bad view should return error as text/plain (BuildQuery error path)
+    $resp = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8123/api/multiunique?exp=source.ip&date=-1&view=BADVIEW&expression=" . uri_escape("file=$pwd/socks-http-example.pcap"));
+    like ($resp->content, qr/Can't find view/, "multiunique bad view error text");
+    is ($resp->header('Content-Type'), 'text/plain; charset=utf-8', "multiunique bad view content-type");
+
+# spigraphhierarchy with bad view should return error as json (noCacheJson protected)
+    $resp = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8123/api/spigraphhierarchy?exp=source.ip&date=-1&view=BADVIEW&expression=" . uri_escape("file=$pwd/socks-http-example.pcap"));
+    like ($resp->content, qr/Can't find view/, "spigraphhierarchy bad view error text");
+    like ($resp->header('Content-Type'), qr|application/json|, "spigraphhierarchy bad view content-type is json");
+
+# TCP reassembly synthetic pcap tests
+    my $json = get("/sessions.json?length=1000&date=-1&expression=" . uri_escape("file=$pwd/tcp-reassembly-synthetic.pcap"));
+    is ($json->{recordsFiltered}, 7, "tcp-reassembly 7 sessions");
+
+    # Build a hash of source port -> session id
+    my %portToId;
+    for my $session (@{$json->{data}}) {
+        $portToId{$session->{source}->{port}} = $session->{id};
+    }
+
+    my $expectedHex = "3031323334353637383961626364656630313233343536373839616263646566";
+    my $expectedGapHex = "3031323334353637000000000000000030313233343536373839616263646566";
+
+    # Port 40001: Normal ordered segments
+    my $response = getBinary("/test/raw/" . $portToId{40001} . "?type=dst");
+    is (unpack("H*", $response->content), $expectedHex, "tcp-reassembly normal (40001)");
+
+    # Port 40002: Full retransmit
+    $response = getBinary("/test/raw/" . $portToId{40002} . "?type=dst");
+    is (unpack("H*", $response->content), $expectedHex, "tcp-reassembly full retransmit (40002)");
+
+    # Port 40003: Partial retransmit
+    $response = getBinary("/test/raw/" . $portToId{40003} . "?type=dst");
+    is (unpack("H*", $response->content), $expectedHex, "tcp-reassembly partial retransmit (40003)");
+
+    # Port 40004: Out of order
+    $response = getBinary("/test/raw/" . $portToId{40004} . "?type=dst");
+    is (unpack("H*", $response->content), $expectedHex, "tcp-reassembly out of order (40004)");
+
+    # Port 40005: Gap (8 missing bytes zero-filled)
+    $response = getBinary("/test/raw/" . $portToId{40005} . "?type=dst");
+    is (unpack("H*", $response->content), $expectedGapHex, "tcp-reassembly gap (40005)");
+
+    # Port 40006: Partial retransmit + cascade
+    $response = getBinary("/test/raw/" . $portToId{40006} . "?type=dst");
+    is (unpack("H*", $response->content), $expectedHex, "tcp-reassembly partial + cascade (40006)");
+
+    # Port 40007: Multiple partial retransmits
+    $response = getBinary("/test/raw/" . $portToId{40007} . "?type=dst");
+    is (unpack("H*", $response->content), $expectedHex, "tcp-reassembly multi-partial (40007)");
