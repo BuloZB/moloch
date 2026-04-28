@@ -36,10 +36,35 @@ NOTICE: Cross-cluster Shortcuts require you to not restart all your viewers at o
 NOTICE: Create a parliament config file before upgrading (see https://arkime.com/settings#parliament and https://arkime.com/faq#how_do_i_upgrade_to_arkime_5)
 
 6.2.1 2026/04/xx
+## BREAKING
+  - #3911 ArkimeParserBuf_t.buf is now a heap-allocated pointer (uint8_t *buf[2]).
+          You must use pb->bufSize[which] instead of sizeof(pb->buf[which])
+## All
+  - #3920 Log more information on role failures
+## Capture
+  - #3910 Corrupt UDP packets could have invalid byte counts
+  - #3910 TCP DNS packets might not be parsed correctly depending on segmentation
+  - #3911, #3913 TCP sequence wrapping tests and improvements
+  - #3912 Fix IKEv2 encryption/hash parsing
+  - #3913 Fix WISE plugin skipping fields after array-typed fields
+  - #3913 Fix S3 listing deadlock when bucket/prefix is empty
+  - #3914 Fix ASN.1 OID decoding of first arc per X.690
+  - #3916 Improved NTP and IS-IS parsing
+  - #3917 Improved LUA ip handling
+  - #3917 Add DHCPv6 relay parsing
+  - #3917 Improved SMB parsing of share/filename
+  - #3917 Improved SNMP GetBulkRequest parsing
+  - #3917 Extract VNI from GENEVE tunnels
+  - #3918 scheme http no longer requires a port (defaults to 80/443)
+  - #3918 fix SNMP sessions showing up as LDAP too
+  - #3919 Remove ftp protocol if we are sure smtp
 ## Viewer
   - #3898 show error msg in spiview when All selected but not allowed
   - #3906 add copy button to History Elasticsearch Query section
   - #3908 fix download entire pcap missing filename
+  - #3921 Fix Cap Restart graph markers, Session Detail labels slider
+          width, Field Actions dropdown, Stats Shrink Index,
+          and shortcut ($) autocomplete in search expression
 
 6.2.0 2026/04/20
 ## BREAKING

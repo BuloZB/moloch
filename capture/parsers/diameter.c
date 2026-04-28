@@ -15,6 +15,8 @@ LOCAL int userNameField;
 LOCAL int cmdCodeField;
 LOCAL int appIdField;
 
+#define DIAMETER_MAX_MSG_LEN 8192
+
 // Common Diameter command codes (RFC 6733)
 LOCAL const char *diameter_cmd_name(uint32_t code)
 {
@@ -167,6 +169,9 @@ LOCAL void diameter_parse_avps(ArkimeSession_t *session, const uint8_t *data, in
         uint32_t padding = (4 - (avpLen & 3)) & 3;
         BSB_IMPORT_skip(bsb, padding);
 
+        if (BSB_IS_ERROR(bsb))
+            break;
+
         switch (avpCode) {
         case 1:   // User-Name
             arkime_field_string_add(userNameField, session, (char *)avpData, dataLen, TRUE);
@@ -255,7 +260,7 @@ LOCAL int diameter_tcp_parser(ArkimeSession_t *session, void *uw, const uint8_t 
         // Message Length (3 bytes, big-endian)
         uint32_t msgLen = (msg[1] << 16) | (msg[2] << 8) | msg[3];
 
-        if (msgLen < 20 || msgLen > sizeof(pb->buf[0]))
+        if (msgLen < 20 || msgLen > pb->bufMax)
             return ARKIME_PARSER_UNREGISTER;
 
         // Wait for full message
@@ -306,7 +311,7 @@ LOCAL int diameter_validate(const uint8_t *data, int len)
     uint32_t msgLen = (data[1] << 16) | (data[2] << 8) | data[3];
 
     // Length must be at least 20 and reasonable
-    if (msgLen < 20 || msgLen > sizeof(((ArkimeParserBuf_t *)0)->buf[0]))
+    if (msgLen < 20 || msgLen > DIAMETER_MAX_MSG_LEN)
         return 0;
 
     // Command flags - check reserved bits are zero
@@ -329,7 +334,7 @@ LOCAL void diameter_tcp_classify(ArkimeSession_t *session, const uint8_t *data, 
         return;
 
     arkime_session_add_protocol(session, "diameter");
-    ArkimeParserBuf_t *pb = arkime_parser_buf_create();
+    ArkimeParserBuf_t *pb = arkime_parser_buf_create2(2048, DIAMETER_MAX_MSG_LEN);
     arkime_parsers_register(session, diameter_tcp_parser, pb, arkime_parser_buf_session_free);
 }
 

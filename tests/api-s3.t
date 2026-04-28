@@ -7,7 +7,6 @@ use Test::Differences;
 use Data::Dumper;
 use strict;
 
-system("perl mini-aws.pl --debug 4566 > /tmp/arkime.s3 &");
 my $nodeFilter = '{ "query": { "terms": { "node": ["s3-test", "sqs-test"] } } }';
 esPost("/tests2_sessions*/_delete_by_query?conflicts=proceed&refresh", $nodeFilter);
 

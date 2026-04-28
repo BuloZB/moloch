@@ -590,10 +590,18 @@ LOCAL int arkime_reader_scheme_processNG(const char *uri, uint8_t *data, int len
 
             readerState.nextStartPos = readerState.startPos + blockHeader->block_total_length;
             if (blockHeader->block_type == 6) {
+                if (readerState.blockSize < 24) {
+                    LOG("ERROR - Invalid EPB block size %d in pcapNG file '%s'", readerState.blockSize, uri);
+                    return 1;
+                }
                 readerState.state = ARKIME_SCHEME_NG_PACKET_HEADER;
             } else if (blockHeader->block_type == 3) {
                 readerState.state = ARKIME_SCHEME_NG_SPB_HEADER;
             } else if (blockHeader->block_type == 1) {
+                if (readerState.blockSize < 8) {
+                    LOG("ERROR - Invalid IDB block size %d in pcapNG file '%s'", readerState.blockSize, uri);
+                    return 1;
+                }
                 readerState.state = ARKIME_SCHEME_NG_INTERFACE;
             } else if (blockHeader->block_type == 0x0A0D0D0A) {
                 // New Section Header Block - reset interface and tsresol state
@@ -658,6 +666,11 @@ LOCAL int arkime_reader_scheme_processNG(const char *uri, uint8_t *data, int len
                 }
 
                 if (otype == 9) {
+                    if (olen < 1) {
+                        options += olen;
+                        options += (4 - (olen & 3)) & 3;
+                        continue;
+                    }
                     if (options[0] & 0x80) {
                         readerState.tsresol = 1ULL << MIN((options[0] & 0x7F), 63);
                     } else {

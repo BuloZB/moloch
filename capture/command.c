@@ -155,6 +155,11 @@ void arkime_command_register(const char *name, ArkimeCommandFunc func, const cha
         commandsArray = g_ptr_array_new();
     }
 
+    if (g_hash_table_contains(commandsHash, name)) {
+        LOG("WARNING - Command '%s' already registered, ignoring duplicate", name);
+        return;
+    }
+
     Command_t *cmd = ARKIME_TYPE_ALLOC0(Command_t);
     cmd->name = g_strdup(name);
     cmd->func = func;
@@ -174,6 +179,11 @@ void arkime_command_register_opts(const char *name, ArkimeCommandFunc func, cons
     if (!commandsHash) {
         commandsHash = g_hash_table_new_full(g_str_hash, g_str_equal, NULL, arkime_command_free);
         commandsArray = g_ptr_array_new();
+    }
+
+    if (g_hash_table_contains(commandsHash, name)) {
+        LOG("WARNING - Command '%s' already registered, ignoring duplicate", name);
+        return;
     }
 
     Command_t *cmd = ARKIME_TYPE_ALLOC0(Command_t);
@@ -234,7 +244,7 @@ void arkime_command_client_incref(void *vcc)
 void arkime_command_client_decref(void *vcc)
 {
     CommandClient_t *cc = (CommandClient_t *)vcc;
-    int newrefs = ARKIME_THREAD_DECRNEW(cc->refs)
+    int newrefs = ARKIME_THREAD_DECRNEW(cc->refs);
     if (newrefs == 0) {
         g_object_unref(cc->socket);
         ARKIME_TYPE_FREE(CommandClient_t, cc);

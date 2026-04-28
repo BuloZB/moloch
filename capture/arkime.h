@@ -55,7 +55,7 @@
 #endif
 #define ARKIME_CACHE_ALIGN __attribute__((aligned(ARKIME_CACHE_LINE_SIZE)))
 
-#define ARKIME_API_VERSION 605
+#define ARKIME_API_VERSION 606
 
 #define ARKIME_SESSIONID_LEN  40
 #define ARKIME_SESSIONID6_LEN 40
@@ -303,20 +303,18 @@ typedef struct {
 #define ARKIME_COND_BROADCAST(var)      pthread_cond_broadcast(&var##_cond)
 #define ARKIME_COND_SIGNAL(var)         pthread_cond_signal(&var##_cond)
 
-#define ARKIME_THREAD_INCR(var)          __sync_add_and_fetch(&var, 1);
-#define ARKIME_THREAD_INCRNEW(var)       __sync_add_and_fetch(&var, 1);
-#define ARKIME_THREAD_INCROLD(var)       __sync_fetch_and_add(&var, 1);
-#define ARKIME_THREAD_INCR_NUM(var, num) __sync_add_and_fetch(&var, num);
+#define ARKIME_THREAD_INCR(var)          __sync_add_and_fetch(&var, 1)
+#define ARKIME_THREAD_INCRNEW(var)       __sync_add_and_fetch(&var, 1)
+#define ARKIME_THREAD_INCROLD(var)       __sync_fetch_and_add(&var, 1)
+#define ARKIME_THREAD_INCR_NUM(var, num) __sync_add_and_fetch(&var, num)
 
-#define ARKIME_THREAD_DECR(var)          __sync_sub_and_fetch(&var, 1);
-#define ARKIME_THREAD_DECRNEW(var)       __sync_sub_and_fetch(&var, 1);
-#define ARKIME_THREAD_DECROLD(var)       __sync_fetch_and_sub(&var, 1);
-#define ARKIME_THREAD_DECR_NUM(var, num) __sync_sub_and_fetch(&var, num);
-
-#define ARKIME_THREAD_CAS(ptr, old, new) __sync_bool_compare_and_swap((ptr), (old), (new))
+#define ARKIME_THREAD_DECR(var)          __sync_sub_and_fetch(&var, 1)
+#define ARKIME_THREAD_DECRNEW(var)       __sync_sub_and_fetch(&var, 1)
+#define ARKIME_THREAD_DECROLD(var)       __sync_fetch_and_sub(&var, 1)
+#define ARKIME_THREAD_DECR_NUM(var, num) __sync_sub_and_fetch(&var, num)
 
 /* You are probably looking here because you think 24 is too low, really it isn't.
- * Instead, increase the number of threads used for reading packets.
+ * Instead, use jemalloc and increase the number of threads used for reading packets.
  * https://arkime.com/faq#why-am-i-dropping-packets
  */
 #define ARKIME_MAX_PACKET_THREADS 24
@@ -552,12 +550,14 @@ typedef struct {
 } ArkimeParserInfo_t;
 
 typedef struct {
-    uint8_t buf[2][8192];
-    int     len[2];
-    int     state[2];
-    int     skipping[2];
-    int     serverWhich;
-    uint8_t version;
+    uint8_t *buf[2];
+    int      len[2];
+    int      state[2];
+    int      skipping[2];
+    uint16_t bufSize[2];
+    uint16_t bufMax;
+    int      serverWhich;
+    uint8_t  version;
 } ArkimeParserBuf_t;
 
 /******************************************************************************/
@@ -1243,6 +1243,7 @@ void arkime_parsers_register_sub(const char *parserName, const char *hexKey, Ark
 GHashTable *arkime_parsers_get_sub(const char *parserName);
 
 ArkimeParserBuf_t *arkime_parser_buf_create();
+ArkimeParserBuf_t *arkime_parser_buf_create2(uint16_t initialSize, uint16_t maxSize);
 int arkime_parser_buf_add(ArkimeParserBuf_t *pb, int which, const uint8_t *data, int len);
 int arkime_parser_buf_del(ArkimeParserBuf_t *pb, int which, int len);
 void arkime_parser_buf_skip(ArkimeParserBuf_t *pb, int which, int skip);
@@ -1322,6 +1323,7 @@ void     arkime_session_init();
 void     arkime_session_exit();
 void     arkime_session_add_protocol(ArkimeSession_t *session, const char *protocol);
 gboolean arkime_session_has_protocol(ArkimeSession_t *session, const char *protocol);
+gboolean arkime_session_rm_protocol(ArkimeSession_t *session, const char *protocol);
 void     arkime_session_add_tag(ArkimeSession_t *session, const char *tag);
 
 #define  arkime_session_incr_outstanding(session) (session)->outstandingQueries++
