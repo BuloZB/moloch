@@ -42,6 +42,7 @@ NOTICE: Create a parliament config file before upgrading (see https://arkime.com
   - #3951 Fix UTF-8 mojibake in user names auto-created via header auth (e.g. behind Caddy/oauth2-proxy)
 ## Capture
   - #3954 Add trimEthernetPadding option to strip Ethernet padding/FCS so saved pcap and byte counts match the on-wire IP length
+  - #3957 Even when not writing packets still save new sessions midway
   - #3958 Add stateDir config option (default /tmp) for capture state files (drophash, stoppedsessions); 
           files now opened with O_NOFOLLOW to prevent symlink attacks
   - #3958 PCAP files now opened with O_NOFOLLOW to prevent symlink attacks
@@ -49,8 +50,6 @@ NOTICE: Create a parliament config file before upgrading (see https://arkime.com
 6.3.1 2026/05/04
 ## Capture
   - #3940 Fix ISAKMP parser on UDP/4500 (NAT-T) misparsed ESP packets without the non-ESP marker
-  - #3957 Even when not writing packets still save new sessions midway
-  
 ## Viewer
   - #3942 Fix hiding packets when we shouldn't
 
