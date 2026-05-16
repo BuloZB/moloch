@@ -1297,6 +1297,10 @@
     ],
     "protocolCnt" : 2,
     "radius" : {
+     "msgType" : [
+      "access-request"
+     ],
+     "msgTypeCnt" : 1,
      "user" : [
       "testuser"
      ]
@@ -9567,6 +9571,23 @@
     "ethertype" : 2048,
     "fileId" : [],
     "firstPacket" : 1737752637000,
+    "ftp" : {
+     "banner" : [
+      "Welcome to Example FTP Server"
+     ],
+     "bannerCnt" : 1,
+     "command" : [
+      "PASS",
+      "USER"
+     ],
+     "commandCnt" : 2,
+     "responseCode" : [
+      "220",
+      "230",
+      "331"
+     ],
+     "responseCodeCnt" : 3
+    },
     "initRTT" : 1000,
     "ipProtocol" : 6,
     "lastPacket" : 1737752644000,
@@ -9626,6 +9647,10 @@
      64
     ],
     "srcTTLCnt" : 1,
+    "tags" : [
+     "ftp:password"
+    ],
+    "tagsCnt" : 1,
     "tcpflags" : {
      "ack" : 1,
      "ae" : 0,
@@ -10469,6 +10494,11 @@
      "framedRIR" : [
       ""
      ],
+     "msgType" : [
+      "access-accept",
+      "access-request"
+     ],
+     "msgTypeCnt" : 2,
      "user" : [
       "testuser"
      ]
@@ -17071,6 +17101,24 @@
      "framedIpCnt" : 1,
      "framedRIR" : [
       "ARIN"
+     ],
+     "msgType" : [
+      "access-accept",
+      "access-request"
+     ],
+     "msgTypeCnt" : 2,
+     "nasASN" : [
+      "---"
+     ],
+     "nasGEO" : [
+      "---"
+     ],
+     "nasIp" : [
+      "10.20.29.1"
+     ],
+     "nasIpCnt" : 1,
+     "nasRIR" : [
+      ""
      ],
      "user" : [
       "testuser"

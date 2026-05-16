@@ -36,8 +36,14 @@ NOTICE: Cross-cluster Shortcuts require you to not restart all your viewers at o
 NOTICE: Create a parliament config file before upgrading (see https://arkime.com/settings#parliament and https://arkime.com/faq#how_do_i_upgrade_to_arkime_5)
 
 6.3.2 2026/05/xx
+## Breaking
+  - #3982 docker.sh: TLS verification is now enforced by default for Elasticsearch/OpenSearch
+          connections. Pass `--insecure` to skip verification (e.g. self-signed certs).
+          The `ARKIME__insecure` environment variable is no longer supported and the
+          container will exit if it is set.
 ## Release
   - #3941 Move to using curl instead of wget everywhere and now depend on package
+  - #3975 Node 22.22.3
 ## All
   - #3951 Fix UTF-8 mojibake in user names auto-created via header auth (e.g. behind Caddy/oauth2-proxy)
   - #3967 All header* auth modes (header, header-jwt, headerOnly, header+digest, header+basic) now
@@ -61,6 +67,9 @@ NOTICE: Create a parliament config file before upgrading (see https://arkime.com
   - #3970 Added full OpenVPN classifier/parser
   - #3972 Improved STUN/TURN parser: extract XOR-PEER-ADDRESS, more methods, and stun.attributes field
   - #3973 Improved OSPF parser: per-(src,dst) sessions and ospf.msgType/routerId/areaId fields, tag weak auth
+  - #3977 Improved RADIUS parser: extract radius.msgType, radius.nasIp, and radius.nasPort
+  - #3978 New FTP parser: detect multi-line 220- banners and add ftp.banner, ftp.command,
+          ftp.filename, ftp.responseCode fields; tag ftp:password when PASS is seen
 ## WISE
   - #3968 Improve JSON Array Parsing: shortcut paths now expand arrays at any
           intermediate position, not just the final value

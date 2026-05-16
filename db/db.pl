@@ -4876,6 +4876,34 @@ sub sessions3Update
     "dstOuterASN" : {
       "type" : "keyword"
     },
+    "ftp" : {
+      "properties" : {
+        "banner" : {
+          "type" : "keyword"
+        },
+        "bannerCnt" : {
+          "type" : "long"
+        },
+        "command" : {
+          "type" : "keyword"
+        },
+        "commandCnt" : {
+          "type" : "long"
+        },
+        "filename" : {
+          "type" : "keyword"
+        },
+        "filenameCnt" : {
+          "type" : "long"
+        },
+        "responseCode" : {
+          "type" : "integer"
+        },
+        "responseCodeCnt" : {
+          "type" : "long"
+        }
+      }
+    },
     "http" : {
       "properties" : {
         "authType" : {
@@ -5643,6 +5671,24 @@ sub sessions3Update
           "type" : "keyword"
         },
         "macCnt" : {
+          "type" : "long"
+        },
+        "msgType" : {
+          "type" : "keyword"
+        },
+        "msgTypeCnt" : {
+          "type" : "long"
+        },
+        "nasIp" : {
+          "type" : "ip"
+        },
+        "nasIpCnt" : {
+          "type" : "long"
+        },
+        "nasPort" : {
+          "type" : "integer"
+        },
+        "nasPortCnt" : {
           "type" : "long"
         },
         "user" : {
