@@ -214,6 +214,8 @@ void http_common_parse_url(ArkimeSession_t *session, char *url, int len)
 {
     const char *end = url + len;
     char *question = memchr(url, '?', len);
+    const char *pathStart = url;
+    int pathLen = question ? (int)(question - url) : len;
 
     if (question) {
         arkime_field_string_add(pathField, session, url, question - url, TRUE);
@@ -256,6 +258,18 @@ void http_common_parse_url(ArkimeSession_t *session, char *url, int len)
         }
     } else {
         arkime_field_string_add(pathField, session, url, len, TRUE);
+    }
+
+    // Lookup http sub-parser by path (lowercased, no query).
+    if (pathLen > 0 && pathLen < 256 && g_hash_table_size(httpSubParsers) > 0) {
+        char key[256];
+        for (int i = 0; i < pathLen; i++)
+            key[i] = tolower((unsigned char)pathStart[i]);
+        key[pathLen] = 0;
+        ArkimeParserInfo_t *info = g_hash_table_lookup(httpSubParsers, key);
+        if (info && info->parserFunc) {
+            info->parserFunc(session, info->uw, (const uint8_t *)url, len, 0);
+        }
     }
 }
 /******************************************************************************/
@@ -354,6 +368,15 @@ LOCAL void arkime_http_parse_authorization(ArkimeSession_t *session, char *str)
         return;
 
     arkime_field_string_add_lower(atField, session, str, space - str);
+
+    if (strncasecmp("ntlm", str, 4) == 0 || strncasecmp("negotiate", str, 9) == 0) {
+        const char *scheme_end = space;
+        const char *b64 = scheme_end;
+        while (*b64 && isspace((unsigned char) * b64)) b64++;
+        if (*b64)
+            arkime_parsers_ntlm_decode_base64(session, b64, strlen(b64));
+        return;
+    }
 
     if (strncasecmp("basic", str, 5) == 0) {
         str += 5;
@@ -543,6 +566,18 @@ LOCAL int arkime_hp_cb_on_header_value (http_parser *parser, const char *at, siz
             else
                 HTTP_GSTR_APPEND(http->authString, at, length);
         } else if (strcasecmp("proxy-authorization", http->header[http->which]) == 0) {
+            if (!http->proxyAuthString)
+                http->proxyAuthString = g_string_new_len(at, length);
+            else
+                HTTP_GSTR_APPEND(http->proxyAuthString, at, length);
+        }
+    } else {
+        if (strcasecmp("www-authenticate", http->header[http->which]) == 0) {
+            if (!http->authString)
+                http->authString = g_string_new_len(at, length);
+            else
+                HTTP_GSTR_APPEND(http->authString, at, length);
+        } else if (strcasecmp("proxy-authenticate", http->header[http->which]) == 0) {
             if (!http->proxyAuthString)
                 http->proxyAuthString = g_string_new_len(at, length);
             else
