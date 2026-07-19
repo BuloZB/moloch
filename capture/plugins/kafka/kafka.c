@@ -23,7 +23,6 @@
 LOCAL rd_kafka_t *rk = NULL; /* Producer instance handle */
 LOCAL rd_kafka_conf_t *conf; /* Temporary configuration object */
 LOCAL char errstr[512];      /* librdkafka API error reporting buffer */
-LOCAL const char *brokers;   /* Argument: broker list */
 LOCAL const char *topic;     /* Argument: topic to produce to */
 LOCAL char kafkaSSL;
 LOCAL const char *kafkaSSLCALocation;
@@ -36,7 +35,7 @@ extern ArkimeConfig_t config;
 /******************************************************************************
  * Message delivery report callback using the richer rd_kafka_message_t object.
  */
-LOCAL void kafka_msg_delivered_bulk_cb(rd_kafka_t *UNUSED(rk), const rd_kafka_message_t *rkmessage, void *UNUSED(opaque))
+LOCAL void kafka_msg_delivered_bulk_cb(rd_kafka_t *UNUSED(producer), const rd_kafka_message_t *rkmessage, void *UNUSED(opaque))
 {
     if (rkmessage->err) {
         LOG("Message delivery failed (broker %"PRId32"): %s",
@@ -154,7 +153,10 @@ void arkime_plugin_init()
                           NULL);
 
     conf = rd_kafka_conf_new();
-    brokers = *arkime_config_str_list(NULL, "kafkaBootstrapServers", "");
+    // Arkime config lists are ;-separated; librdkafka wants comma-separated
+    gchar **brokersList = arkime_config_str_list(NULL, "kafkaBootstrapServers", "");
+    gchar *brokers = g_strjoinv(",", brokersList);
+    g_strfreev(brokersList);
     topic = arkime_config_str(NULL, "kafkaTopic", "arkime-json");
 
     // See more config on https://github.com/edenhill/librdkafka/blob/master/CONFIGURATION.md
@@ -166,6 +168,8 @@ void arkime_plugin_init()
 
     if (config.debug)
         LOG("kafka broker %s", brokers);
+
+    g_free(brokers);
 
     kafkaSSL = arkime_config_boolean(NULL, "kafkaSSL", FALSE);
     if (kafkaSSL) {
@@ -205,7 +209,7 @@ void arkime_plugin_init()
         if (kafkaSSLKeyPassword) {
             if (rd_kafka_conf_set(conf, "ssl.key.password", kafkaSSLKeyPassword,
                                   errstr, sizeof(errstr)) != RD_KAFKA_CONF_OK) {
-                LOGEXIT("Error configuring kafka:ss.key.password, error = %s", errstr);
+                LOGEXIT("Error configuring kafka:ssl.key.password, error = %s", errstr);
             }
         }
     }

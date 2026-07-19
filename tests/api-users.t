@@ -1,7 +1,7 @@
 # Many of these test user/roles start with sac- (skip auto create) because
 # otherwise viewer in regression mode would auto create the user.
 # Some day should remove all autocreate code.
-use Test::More tests => 262;
+use Test::More tests => 266;
 use Cwd;
 use URI::Escape;
 use ArkimeTest;
@@ -25,16 +25,28 @@ my $json;
 
 # users
     my $users = viewerPost("/api/users", "");
-    is (@{$users->{data}}, 1, "anonymous, superAdmin");
+    is (@{$users->{data}}, 1, "anonymous");
 
 # csv
     my $csv = $ArkimeTest::userAgent->post("http://$ArkimeTest::host:8123/api/users.csv", Content => "")->content;
     $csv =~ s/\r//g;
-    eq_or_diff ($csv, 'userId, userName, enabled, webEnabled, headerAuthEnabled, roles, emailSearch, removeEnabled, packetSearch, hideStats, hideFiles, hidePcap, disablePcapDownload, expression, timeLimit
+    eq_or_diff ($csv, 'userId,userName,enabled,webEnabled,headerAuthEnabled,roles,emailSearch,removeEnabled,packetSearch,hideStats,hideFiles,hidePcap,disablePcapDownload,expression,timeLimit
 anonymous,,true,true,false,"arkimeAdmin, cont3xtUser, parliamentUser, usersAdmin, wiseUser",true,true,true,,,,,,
 ', "CSV Users");
 
-# Can't create system rule
+# csv formula injection - userName/expression starting with a trigger char must be neutralized with a leading '
+    $json = viewerPostToken("/api/user", '{"userId": "sac-csvinj", "userName": "=cmd|calc", "enabled":true, "password":"password", "roles":["arkimeUser"], "expression":"+danger"}', $token);
+    eq_or_diff($json, from_json('{"text": "User created successfully", "success": true}'));
+
+    my $csvinj = $ArkimeTest::userAgent->post("http://$ArkimeTest::host:8123/api/users.csv", Content => "")->content;
+    $csvinj =~ s/\r//g;
+    like ($csvinj, qr/sac-csvinj,'=cmd\|calc,/, "CSV neutralizes formula in userName");
+    like ($csvinj, qr/,'\+danger,/, "CSV neutralizes formula in expression");
+    unlike ($csvinj, qr/,=cmd/, "CSV has no raw formula userName");
+
+    $json = viewerDeleteToken("/api/user/sac-csvinj", $token);
+
+# Can't create system role
     $json = viewerPostToken("/api/user", '{"userId": "usersAdmin", "userName": "UserName", "enabled":true, "password":"password"}', $token);
     eq_or_diff($json, from_json('{"text": "User ID can\'t be a system role id", "success": false}'));
 
@@ -44,7 +56,7 @@ anonymous,,true,true,false,"arkimeAdmin, cont3xtUser, parliamentUser, usersAdmin
     $json = viewerPostToken("/api/user/sac-usersAdmin!", '{"userId": "usersAdmin\u001b", "userName": "UserName", "enabled":true, "password":"password", "roles":["arkimeUser"]}', $token);
     eq_or_diff($json, from_json('{"text": "User not found", "success": false}'));
 
-# Create Missing/Emptry fields
+# Create Missing/Empty fields
     $json = viewerPostToken("/api/user", '{"userName": "UserName", "enabled":true, "password":"password"}', $token);
     eq_or_diff($json, from_json('{"text": "Missing/Empty required fields", "success": false}'));
 
@@ -108,7 +120,7 @@ anonymous,,true,true,false,"arkimeAdmin, cont3xtUser, parliamentUser, usersAdmin
 
 # Check appinfo works
     $json = viewerGetToken("/api/appInfo", $token);
-    eq_or_diff(sort($json->{roles}), from_json('["arkimeAdmin", "arkimeUser", "cont3xtAdmin", "cont3xtUser", "parliamentAdmin", "parliamentUser", "superAdmin", "usersAdmin", "wiseAdmin", "wiseUser"]'));
+    eq_or_diff(sort($json->{roles}), from_json('["arkimeAdmin", "arkimeUser", "cont3xtAdmin", "cont3xtUser", "dbAdmin", "parliamentAdmin", "parliamentUser", "superAdmin", "usersAdmin", "wiseAdmin", "wiseUser"]'));
     my @roles = sort @{$json->{user}->{roles}};
     eq_or_diff(\@roles, from_json('["arkimeAdmin", "arkimeUser", "cont3xtUser", "parliamentUser", "usersAdmin", "wiseUser"]'));
 
@@ -254,12 +266,12 @@ anonymous,,true,true,false,"arkimeAdmin, cont3xtUser, parliamentUser, usersAdmin
     is ($users->{recordsFiltered}, 5);
 
     $users = viewerPost("/api/users", "start=0&length=1");
-    is (@{$users->{data}}, 1, "start=1&length=1");
+    is (@{$users->{data}}, 1, "start=0&length=1");
     is ($users->{recordsTotal}, 5);
     is ($users->{recordsFiltered}, 5);
 
     $users = viewerPost("/api/users", "start=666&length=100000");
-    is (@{$users->{data}}, 0, "start=0&length=100000");
+    is (@{$users->{data}}, 0, "start=666&length=100000");
     is ($users->{recordsTotal}, 0);
     is ($users->{recordsFiltered}, 0);
 
@@ -485,11 +497,11 @@ anonymous,,true,true,false,"arkimeAdmin, cont3xtUser, parliamentUser, usersAdmin
 
     # not a user:
     $json = viewerGet("/api/fieldActions?arkimeRegressionUser=test100");
-    eq_or_diff($json, from_json('{"ALLTESTWISE":{"url":"http:/www.example.com","all":true,"name":"AllWiseTest"},"ALLTEST":{"name":"All Field Action %FIELDNAME%!","url":"https://www.asdf.com?expression=%EXPRESSION%&date=%DATE%&field=%FIELD%&dbField=%DBFIELD%","all":true}}'), 'not a fieldActions user:');
+    eq_or_diff($json, from_json('{"ALLTESTWISE":{"url":"http://www.example.com","all":true,"name":"AllWiseTest"},"ALLTEST":{"name":"All Field Action %FIELDNAME%!","url":"https://www.asdf.com?expression=%EXPRESSION%&date=%DATE%&field=%FIELD%&dbField=%DBFIELD%","all":true}}'), 'not a fieldActions user:');
 
     # notUser:
     $json = viewerGet("/api/fieldActions?arkimeRegressionUser=test101");
-    eq_or_diff($json, from_json('{"ALLTEST":{"url":"https://www.asdf.com?expression=%EXPRESSION%&date=%DATE%&field=%FIELD%&dbField=%DBFIELD%","all":true,"name":"All Field Action %FIELDNAME%!"},"ALLTESTWISE":{"url":"http:/www.example.com","all":true,"name":"AllWiseTest"}}'), 'notUser fieldActions');
+    eq_or_diff($json, from_json('{"ALLTEST":{"url":"https://www.asdf.com?expression=%EXPRESSION%&date=%DATE%&field=%FIELD%&dbField=%DBFIELD%","all":true,"name":"All Field Action %FIELDNAME%!"},"ALLTESTWISE":{"url":"http://www.example.com","all":true,"name":"AllWiseTest"}}'), 'notUser fieldActions');
 
 # reverseDNS tests
     my $txt = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8123/api/reversedns?ip=thisisnotanip")->content;
@@ -531,7 +543,7 @@ anonymous,,true,true,false,"arkimeAdmin, cont3xtUser, parliamentUser, usersAdmin
     eq_or_diff($json, from_json('{"text": "Role created successfully", "success": true}'));
 
     $json = viewerPost("/api/users?arkimeRegressionUser=role:sac-test1", "");
-    eq_or_diff($json, from_json('{"text": "Can not authenticate with role", "success": false}'));
+    eq_or_diff($json, from_json('{"text": "Cannot authenticate with role", "success": false}'));
 
 # role tests
     $json = viewerPostToken("/api/user/role:sac-test1", '{"roles":["superAdmin"]}', $token);
@@ -605,7 +617,7 @@ anonymous,,true,true,false,"arkimeAdmin, cont3xtUser, parliamentUser, usersAdmin
 # csv
     my $csv = $ArkimeTest::userAgent->post("http://$ArkimeTest::host:8123/api/users.csv", Content => "")->content;
     $csv =~ s/\r//g;
-    eq_or_diff ($csv, 'userId, userName, enabled, webEnabled, headerAuthEnabled, roles, emailSearch, removeEnabled, packetSearch, hideStats, hideFiles, hidePcap, disablePcapDownload, expression, timeLimit
+    eq_or_diff ($csv, 'userId,userName,enabled,webEnabled,headerAuthEnabled,roles,emailSearch,removeEnabled,packetSearch,hideStats,hideFiles,hidePcap,disablePcapDownload,expression,timeLimit
 anonymous,,true,true,false,"arkimeAdmin, cont3xtUser, parliamentUser, usersAdmin, wiseUser",true,true,true,,,,,,
 notadmin,,true,true,false,"arkimeUser, cont3xtUser, parliamentUser, wiseUser",true,true,true,,,,,,
 role:sac-test1,UserName,true,false,false,"",,,,,,,,,

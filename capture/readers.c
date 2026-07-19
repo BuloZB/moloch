@@ -100,7 +100,7 @@ void arkime_readers_start()
     }
     g_strfreev(interfaceOps);
 
-    // Compile all the filename ops.  The formation is fieldexpr=value%value
+    // Compile all the filename ops.  The format is fieldexpr=value%value
     // value is expanded using the g_regex_replace rules (\1 being the first capture group)
     // https://developer.gnome.org/glib/stable/glib-Perl-compatible-regular-expressions.html#g-regex-replace
     char **filenameOpsStr;
@@ -138,7 +138,7 @@ void arkime_readers_start()
 
         int fieldPos = arkime_field_by_exp(filenameOpsStr[i]);
         if (fieldPos == -1) {
-            CONFIGEXIT("Must be FieldExpr=regex?value, Unknown field expression '%s'", filenameOpsStr[i]);
+            CONFIGEXIT("Must be FieldExpr=regex%%value, Unknown field expression '%s'", filenameOpsStr[i]);
         }
 
         readerFilenameOps[readerFilenameOpsNum].regex = g_regex_new(equal + 1, 0, 0, 0);

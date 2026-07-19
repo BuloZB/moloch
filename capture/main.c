@@ -118,12 +118,13 @@ LOCAL  GOptionEntry entries[] = {
     { "skip",      's',                    0, G_OPTION_ARG_NONE,           &config.pcapSkip,      "Used with -R option and without --copy, skip files already processed", NULL },
     { "reprocess",   0,                    0, G_OPTION_ARG_NONE,           &config.pcapReprocess, "In offline mode reprocess files, use the same files table entry", NULL },
     { "recursive",   0,                    0, G_OPTION_ARG_NONE,           &config.pcapRecursive, "When in offline pcap directory mode, recurse sub directories", NULL },
+    { "sorted",      0,                    0, G_OPTION_ARG_NONE,           &config.pcapSorted,    "When in offline pcap directory mode, sort files alphabetically before processing", NULL },
     { "node",      'n',                    0, G_OPTION_ARG_STRING,         &config.nodeName,      "Our node name, defaults to hostname.  Multiple nodes can run on same host", NULL },
     { "host",        0,                    0, G_OPTION_ARG_STRING,         &config.hostName,      "Override hostname, this is what remote viewers will use to connect", NULL },
     { "tag",       't',                    0, G_OPTION_ARG_STRING_ARRAY,   &config.extraTags,     "Extra tag to add to all packets, can be used multiple times", NULL },
     { "tags",        0, G_OPTION_FLAG_HIDDEN, G_OPTION_ARG_STRING_ARRAY,   &config.extraTags,     "Extra tag to add to all packets, can be used multiple times", NULL },
     { "filelist",  'F',                    0, G_OPTION_ARG_STRING_ARRAY,   &config.pcapFileLists, "File that has a list of pcap file names, 1 per line", NULL },
-    { "op",          0,                    0, G_OPTION_ARG_STRING_ARRAY,   &config.extraOps,      "FieldExpr=Value to set on all session, can be used multiple times", NULL},
+    { "op",          0,                    0, G_OPTION_ARG_STRING_ARRAY,   &config.extraOps,      "FieldExpr=Value to set on all sessions, can be used multiple times", NULL},
     { "option",    'o',                    0, G_OPTION_ARG_CALLBACK,       arkime_cmdline_option, "Key=Value to override config.ini", NULL },
     { "version",   'v',                    0, G_OPTION_ARG_NONE,           &showVersion,          "Show version number", NULL },
     { "debug",     'd', G_OPTION_FLAG_NO_ARG, G_OPTION_ARG_CALLBACK,       arkime_debug_flag,     "Turn on all debugging", NULL },
@@ -286,9 +287,11 @@ LOCAL void parse_args(int argc, char **argv)
     if (!config.hostName) {
         config.hostName = malloc(256);
         gethostname(config.hostName, 256);
+        config.hostName[255] = 0; // gethostname doesn't NUL terminate on truncation
         const char *dot = strchr(config.hostName, '.');
         if (!dot) {
             char domainname[256];
+            domainname[255] = 0; // getdomainname doesn't NUL terminate on truncation
             if (getdomainname(domainname, 255) == 0 && strlen(domainname) > 0 && strcmp(domainname, "(none)") != 0) {
                 g_strlcat(config.hostName, ".", 255);
                 g_strlcat(config.hostName, domainname, 255);
@@ -296,7 +299,6 @@ LOCAL void parse_args(int argc, char **argv)
                 LOG("WARNING: gethostname doesn't return a fully qualified name and getdomainname failed, this may cause issues when viewing pcaps, use the --host option - %s", config.hostName);
             }
         }
-        config.hostName[255] = 0;
     }
 
     if (!config.nodeName) {
@@ -344,6 +346,11 @@ LOCAL void parse_args(int argc, char **argv)
         exit(1);
     }
 
+    if (config.pcapSorted && config.pcapMonitor) {
+        printf("--sorted cannot be used with --monitor\n");
+        exit(1);
+    }
+
     if (config.pcapReadFiles) {
         for (int i = 0; config.pcapReadFiles[i]; i++) {
             if (strcmp("-", config.pcapReadFiles[i]) == 0 && !config.copyPcap) {
@@ -370,10 +377,9 @@ void arkime_free_later(void *ptr, GDestroyNotify cb)
     int back = freeLaterBack;
     freeLaterBack = (freeLaterBack + 1) & FREE_LATER_AND;
     freeLaterList[back].sec = currentTime.tv_sec + 7;
-    ARKIME_UNLOCK(freeLaterList);
-
     freeLaterList[back].ptr = ptr;
     freeLaterList[back].cb  = cb;
+    ARKIME_UNLOCK(freeLaterList);
 }
 /******************************************************************************/
 LOCAL gboolean arkime_free_later_check (gpointer UNUSED(user_data))
@@ -615,6 +621,9 @@ const char *arkime_memstr(const char *haystack, int haysize, const char *needle,
 /******************************************************************************/
 const char *arkime_memcasestr(const char *haystack, int haysize, const char *needle, int needlesize)
 {
+    if (needlesize > haysize)
+        return NULL;
+
     const char *p;
     const char *end = haystack + haysize - needlesize;
     const char firstNeedle = needle[0];
@@ -1148,12 +1157,14 @@ LLVMFuzzerInitialize(int *UNUSED(argc), char ***UNUSED(argv))
     arkime_plugins_init();
     arkime_field_init();
     arkime_db_init();
+    arkime_python_init();
     arkime_mprotocol_init();
     arkime_packet_init();
     arkime_config_load_packet_ips();
     arkime_yara_init();
     arkime_parsers_init();
     arkime_session_init();
+    arkime_dedup_init();
     arkime_plugins_load(config.plugins, TRUE);
     arkime_config_load_override_ips();
     arkime_rules_init();
@@ -1190,6 +1201,7 @@ LLVMFuzzerInitialize(int *UNUSED(argc), char ***UNUSED(argv))
     config.pcapReadOffline = 1;
     config.hostName = strdup("fuzz.example.com");
     config.nodeName = strdup("fuzz");
+    config.ignoreErrors = 1;
 
     hashSalt = 0;
     pcapFileHeader.dlt = DLT_EN10MB;
@@ -1206,6 +1218,7 @@ LLVMFuzzerInitialize(int *UNUSED(argc), char ***UNUSED(argv))
     arkime_plugins_init();
     arkime_field_init();
     arkime_db_init();
+    arkime_python_init();
     arkime_mprotocol_init();
     arkime_packet_init();
     arkime_config_load_packet_ips();
@@ -1253,7 +1266,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         packet->pktlen         = len;
         packet->pkt            = ptr;
         packet->ts.tv_sec      = ts >> 4;
-        packet->ts.tv_usec     = ts & 0x8;
+        packet->ts.tv_usec     = ts & 0xf;
         ts++;
         packet->readerFilePos  = 0;
         packet->readerPos      = 0;

@@ -28,7 +28,7 @@ if ($ARGV[0] eq "--insecure") {
 
 my $host = $ARGV[0];
 
-if ($host !~ /(http:|https)/) {
+if ($host !~ m{^https?://}) {
     $host = "http://$ARGV[0]";
 }
 
@@ -41,7 +41,7 @@ if (!$INSECURE && $host =~ /^https:\/\//) {
 }
 
 showHelp("Missing arguments") if (@ARGV < 3); # Again because of INSECURE
-showHelp("Must be ip, host, or md5 for file type instead of $ARGV[1]") if ($ARGV[1] !~ /^(host|ip|md5|email|uri)$/);
+showHelp("Must be ip, host, md5, email, or uri for file type instead of $ARGV[1]") if ($ARGV[1] !~ /^(host|ip|md5|email|uri)$/);
 showHelp("file '$ARGV[2]' not found") if (! -f $ARGV[2]);
 showHelp("file '$ARGV[2]' empty") if (-z $ARGV[2]);
 
@@ -64,13 +64,13 @@ open (FILE, $ARGV[2]);
 my $fields = "";
 while (<FILE>) {
     if (/^#field:/) {
-        chop;
+        s/[\r\n]+$//;
         $fields = '"fields":"' if ($fields eq "");
         $fields .= substr($_, 1) . ",";
         next;
     }
     next if (/^#/ || /^$/);
-    chop;
+    s/[\r\n]+$//;
     push(@ELEMENTS, $_);
 }
 
@@ -82,12 +82,19 @@ if ($fields ne "") {
 my $elements = join ',', @ELEMENTS;
 close (FILE);
 
+sub jsonEscape {
+    my ($str) = @_;
+    $str =~ s/\\/\\\\/g;
+    $str =~ s/"/\\"/g;
+    return $str;
+}
+
 my $md5hex = md5_hex($elements);
 
 my $tags = "";
-$tags = '"tags": "' . join(',', @ARGV[3 .. $#ARGV]) . '",' if (@ARGV >= 4);
+$tags = '"tags": "' . jsonEscape(join(',', @ARGV[3 .. $#ARGV])) . '",' if (@ARGV >= 4);
 
-my $content  = qq({${fields}${tags}"md5":"$md5hex", "type":"$ARGV[1]", "data":"$elements"}\n);
+my $content  = qq({${fields}${tags}"md5":"$md5hex", "type":"$ARGV[1]", "data":"@{[jsonEscape($elements)]}"}\n);
 $response = $userAgent->post("$host/tagger/_doc/$ARGV[2]", "Content-Type" => "application/json;charset=UTF-8", Content => $content);
 print $response->content, "\n";
 

@@ -1,4 +1,4 @@
-use Test::More tests => 39;
+use Test::More tests => 44;
 
 use Cwd;
 use URI::Escape;
@@ -28,7 +28,7 @@ my $pwd = "*/pcap";
     while ($sd =~ /ts-value/g) {
         $count++;
     }
-    is (12, $count);
+    is ($count, 12);
 
     $sd = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8123/api/session/test/$id/packets?line=false&ts=false&base=natural")->content;
     ok(bin2hex($sd) =~ /636f6c3a2038303a71756963.*08000000000002/, "encoding:natural");
@@ -176,7 +176,7 @@ my $noPcapDoc = '{
   "tags": ["' . $noPcapTag . '"],
   "tagsCnt": 1
 }';
-esPost("/$noPcapIndex/_doc/$noPcapDocId?refresh=wait_for", $noPcapDoc);
+esPost("/$noPcapIndex/_doc/$noPcapDocId?refresh=true", $noPcapDoc);
 
 my $noPcapList = viewerGet("/sessions.json?date=-1&expression=" . uri_escape("tags=$noPcapTag"));
 is (scalar @{$noPcapList->{data}}, 1, "no-pcap session indexed");
@@ -191,3 +191,46 @@ is ($noPcapPackets->code, 200, "no-pcap /packets returns 200 (no crash)");
 ok($noPcapPackets->content !~ m{Cannot set properties of undefined}, "no-pcap /packets does not throw TypeError");
 
 esPost("/$noPcapIndex/_delete_by_query?conflicts=proceed&refresh", '{ "query": { "term": { "tags": "' . $noPcapTag . '" } } }');
+
+# Test we escape {
+my $xssTag = "dns-vue-xss-regression-tag";
+my $xssDocId = "abcdef0123456789dnsxss00";
+my $xssDoc = '{
+  "@timestamp": 1745000000000,
+  "firstPacket": 1745000000000,
+  "lastPacket": 1745000001000,
+  "node": "test",
+  "ipProtocol": 17,
+  "source": {"ip": "10.99.99.11", "port": 1001, "bytes": 100, "packets": 1},
+  "destination": {"ip": "10.99.99.21", "port": 53, "bytes": 100, "packets": 1},
+  "network": {"packets": 2, "bytes": 200},
+  "totDataBytes": 100,
+  "length": 1,
+  "protocol": ["dns"],
+  "protocolCnt": 1,
+  "dns": [{"opcode": "QUERY", "qt": "A", "qc": "IN", "queryHost": "{constructor", "hostCnt": 1, "host": ["{constructor"]}],
+  "dnsCnt": 1,
+  "tags": ["' . $xssTag . '"],
+  "tagsCnt": 1
+}';
+esPost("/$noPcapIndex/_doc/$xssDocId?refresh=true", $xssDoc);
+
+my $xssList = viewerGet("/sessions.json?date=-1&expression=" . uri_escape("tags=$xssTag"));
+is (scalar @{$xssList->{data}}, 1, "dns xss session indexed");
+my $xssId = $xssList->{data}->[0]->{id};
+
+$sd = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8123/api/session/test/$xssId/detail")->content;
+ok($sd =~ m{Query A - &#123;constructor}s, "dns queryHost { escaped to &#123; in /detail");
+ok($sd !~ m{[^"]\{constructor}s, "dns queryHost has no raw { in /detail");
+
+esDelete("/$noPcapIndex/_doc/$xssDocId?refresh=true");
+
+# decode parameter validation
+    $sdId = viewerGet("/sessions.json?date=-1&expression=" . uri_escape("file=$pwd/smtp-zip.pcap"));
+    $id = $sdId->{data}->[0]->{id};
+
+    my $response = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8123/api/session/test/$id/packets?decode=" . uri_escape('{"BODY-UNBASE64":{}}'));
+    is ($response->code, 200, "packets with valid decode key works");
+
+    $response = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8123/api/session/test/$id/packets?decode=" . uri_escape('{"FOO":{}}'));
+    is ($response->code, 400, "packets with unknown decode key returns 400 instead of hanging");

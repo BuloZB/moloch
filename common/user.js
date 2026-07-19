@@ -15,7 +15,7 @@ const otplib = require('otplib');
 const QRCode = require('qrcode');
 
 const systemRolesMapping = {
-  superAdmin: ['usersAdmin', 'arkimeAdmin', 'arkimeUser', 'parliamentAdmin', 'parliamentUser', 'wiseAdmin', 'wiseUser', 'cont3xtAdmin', 'cont3xtUser'],
+  superAdmin: ['usersAdmin', 'arkimeAdmin', 'arkimeUser', 'parliamentAdmin', 'parliamentUser', 'wiseAdmin', 'wiseUser', 'cont3xtAdmin', 'cont3xtUser', 'dbAdmin'],
   usersAdmin: [],
   arkimeAdmin: ['arkimeUser'],
   arkimeUser: [],
@@ -24,11 +24,12 @@ const systemRolesMapping = {
   wiseAdmin: ['wiseUser'],
   wiseUser: [],
   cont3xtAdmin: ['cont3xtUser'],
-  cont3xtUser: []
+  cont3xtUser: [],
+  dbAdmin: []
 };
 
-const adminRoles = ['usersAdmin', 'arkimeAdmin', 'parliamentAdmin', 'wiseAdmin', 'cont3xtAdmin'];
-const adminRolesWithSuper = ['superAdmin', 'usersAdmin', 'arkimeAdmin', 'parliamentAdmin', 'wiseAdmin', 'cont3xtAdmin'];
+const adminRoles = ['usersAdmin', 'arkimeAdmin', 'parliamentAdmin', 'wiseAdmin', 'cont3xtAdmin', 'dbAdmin'];
+const adminRolesWithSuper = ['superAdmin', 'usersAdmin', 'arkimeAdmin', 'parliamentAdmin', 'wiseAdmin', 'cont3xtAdmin', 'dbAdmin'];
 
 const usersMissing = {
   userId: '',
@@ -252,6 +253,18 @@ class User {
   }
 
   /**
+   * Return ALL users with their full raw data, including sensitive fields such
+   * as passStore and cont3xt keys. Unlike searchUsers/getUser this does NOT
+   * clean, filter, or expand roles. Intended for admin/maintenance tasks that
+   * need the stored document as-is (e.g. re-encrypting after a passwordSecret
+   * change). Pair with setUser to write changes back.
+   * @returns {Promise<Array>} every stored user/role document, unmodified
+   */
+  static getAllUsers () {
+    return User.#implementation.getAllUsers();
+  }
+
+  /**
    * @private
    * Create a user from thin air!
    */
@@ -382,7 +395,6 @@ class User {
   /**
    * Determines whether each user in the list of users is valid or invalid.
    * @param {Array} userIdList - Array of userIds
-   * @param {boolean} anonymousMode - Whether the app is running in anonymous mode (no users)
    * @returns {Object} - An object containing two lists, one of valid users and one of invalid users.
    *                     A valid user can be found in the user's db based on userId
    */
@@ -419,7 +431,7 @@ class User {
    * Return all available roles using cache
    */
   static async allRolesCache () {
-    if (User.#rolesCache._timeStamp > Date.now() - User.#userCacheTimeout) {
+    if (User.#rolesCache.roles && User.#rolesCache._timeStamp > Date.now() - User.#userCacheTimeout) {
       return User.#rolesCache.roles;
     }
 
@@ -443,7 +455,8 @@ class User {
    * superAdmin - has access to all the applications and can configure anything<br>
    * usersAdmin - has access to configure users<br>
    * wiseAdmin - has administrative access to WISE (can configure and update WISE)<br>
-   * wiseUser - has access to WISE
+   * wiseUser - has access to WISE<br>
+   * dbAdmin - has access to perform database administration tasks
    * @typedef ArkimeRole
    * @type {string}
    */
@@ -480,7 +493,7 @@ class User {
   }
 
   /**
-   * Web Api for getting current user
+   * Web API for getting current user
    */
   static async getCurrentUser (req) {
     const userProps = [
@@ -646,7 +659,7 @@ class User {
     ]).then(([users, total]) => {
       if (users.error) { throw users.error; }
       const columns = 'userId,userName,enabled,webEnabled,headerAuthEnabled,roles,emailSearch,removeEnabled,packetSearch,hideStats,hideFiles,hidePcap,disablePcapDownload,expression,timeLimit'.split(',');
-      res.write(columns.join(', '));
+      res.write(columns.join(','));
       res.write('\r\n');
       users = users.users;
       for (let u = 0; u < users.length; u++) {
@@ -656,9 +669,12 @@ class User {
           if (value === undefined) {
             value = '';
           } else if (Array.isArray(value)) {
-            value = '"' + value.join(', ').replace(/"/g, '""') + '"';
-          } else if (typeof (value) === 'string' && (value.includes(',') || value.includes('"') || value.includes('\n') || value.includes('\r'))) {
-            value = '"' + value.replace(/"/g, '""') + '"';
+            value = '"' + value.map(v => ArkimeUtil.csvSafeStr(String(v))).join(', ').replace(/"/g, '""') + '"';
+          } else if (typeof (value) === 'string') {
+            value = ArkimeUtil.csvSafeStr(value);
+            if (value.includes(',') || value.includes('"') || value.includes('\n') || value.includes('\r')) {
+              value = '"' + value.replace(/"/g, '""') + '"';
+            }
           }
           values.push(value);
         }
@@ -820,6 +836,15 @@ class User {
 
     req.body.roleAssigners ??= [];
 
+    // Validate timeLimit same as update path
+    let timeLimit;
+    if (req.body.timeLimit !== undefined && req.body.timeLimit !== null && req.body.timeLimit !== '') {
+      timeLimit = parseInt(req.body.timeLimit, 10);
+      if (!Number.isFinite(timeLimit) || timeLimit < 0) {
+        return res.serverError(422, 'timeLimit must be a non-negative integer');
+      }
+    }
+
     User.getUser(req.body.userId, (err, user) => {
       if (user) {
         console.log('Trying to add duplicate user', util.inspect(err, false, 50), user);
@@ -831,7 +856,7 @@ class User {
         userName: req.body.userName,
         expression: req.body.expression,
         passStore: Auth.pass2store(req.body.userId, req.body.password),
-        timeLimit: req.body.timeLimit,
+        timeLimit,
         enabled: req.body.enabled === true,
         webEnabled: req.body.webEnabled === true,
         headerAuthEnabled: req.body.headerAuthEnabled === true,
@@ -973,7 +998,7 @@ class User {
         return res.serverError(403, 'Can not disable superAdmin unless you are superAdmin');
       }
 
-      // userAdmin can disable Admin roles but can not enable new ones
+      // usersAdmin can disable Admin roles but cannot enable new ones
       if (!iamSuperAdmin && adminRoles.some(v => rolesSet.has(v) && !user.hasRole(v))) {
         return res.serverError(403, 'Only superAdmin user can enable Admin roles on a user');
       }
@@ -1112,7 +1137,7 @@ class User {
    * POST - /api/user/password
    *
    * Update user password.
-   * NOTE: currentPassword is not required so that a usersAdmin can update anyone user's password.
+   * NOTE: currentPassword is not required so that a usersAdmin can update any user's password.
    * @name /user/password
    * @returns {boolean} success - Whether the update password operation was successful.
    * @returns {string} text - The success/error message to (optionally) display to the user.
@@ -1122,8 +1147,8 @@ class User {
       return res.serverError(403, 'New password needs to be at least 3 characters');
     }
 
-    const storeHa1 = Auth.store2ha1(req.user.passStore);
-    const reqHa1 = Auth.store2ha1(Auth.pass2store(req.token.userId, req.body.currentPassword));
+    const storeHa1 = Auth.store2ha1(req.user.passStore, req.user.userId);
+    const reqHa1 = Auth.store2ha1(Auth.pass2store(req.token.userId, req.body.currentPassword), req.token.userId);
     if (!req.user.hasRole('usersAdmin') && (
       storeHa1.length !== reqHa1.length ||
       !cryptoLib.timingSafeEqual(Buffer.from(storeHa1), Buffer.from(reqHa1)) ||
@@ -1133,7 +1158,7 @@ class User {
 
     // Skip this check if we are a superAdmin
     if (!req.user.hasRole('superAdmin')) {
-      // Only change the password if we have the same admin roles(s)
+      // Only change the password if we have the same admin role(s)
       for (const role of adminRolesWithSuper) {
         if (!req.user.hasRole(role) && req.settingUser.hasRole(role)) {
           return res.serverError(403, `Not allowed to change ${role} password`);
@@ -1166,8 +1191,13 @@ class User {
     if (!secret) {
       return false;
     }
-    const result = otplib.verifySync({ secret, token, ...User.#totpOptions });
-    return result.valid;
+    try {
+      // verifySync throws on malformed tokens (non-digits, wrong length, etc)
+      const result = otplib.verifySync({ secret, token, ...User.#totpOptions });
+      return result.valid;
+    } catch (err) {
+      return false;
+    }
   }
 
   // Verify a TOTP code for this user (with rate limiting)
@@ -1473,7 +1503,9 @@ class User {
         }
 
         if (this.#allSettings[col] !== undefined) {
-          this.#allSettings[col] |= role.#allSettings[col];
+          // Keep booleans boolean - bitwise |= would yield 1, breaking the
+          // strict === true checks in checkPermissions
+          this.#allSettings[col] = this.#allSettings[col] || role.#allSettings[col];
         } else {
           this.#allSettings[col] = role.#allSettings[col];
         }
@@ -1590,6 +1622,19 @@ class User {
     return async (req, res, next) => {
       if (!req.user.hasAllRole(role)) {
         console.log(`Permission denied to ${req.user.userId} while requesting resource: ${req._parsedUrl.pathname}, using role ${role}`);
+        return res.serverError(403, 'You do not have permission to access this resource');
+      }
+      next();
+    };
+  }
+
+  /**
+   * Denies access unless the requesting user has at least one of the required roles (OR logic)
+   */
+  static checkAnyRole (roles) {
+    return async (req, res, next) => {
+      if (!req.user.hasRole(roles)) {
+        console.log(`Permission denied to ${req.user.userId} while requesting resource: ${req._parsedUrl.pathname}, using any role ${roles}`);
         return res.serverError(403, 'You do not have permission to access this resource');
       }
       next();
@@ -1714,7 +1759,7 @@ class User {
   }
 
   /**
-   * Return set of all roles expanded for ourself
+   * Return set of all roles expanded for ourselves
    */
   async getRoles () {
     if (this.#allRoles === undefined) {
@@ -1729,7 +1774,7 @@ class User {
   }
 
   /**
-   * Returns all roles that the currently this user has assignment access to
+   * Returns all roles that the current user has assignment access to
    */
   async getAssignableRoles (userId) {
     return await User.#implementation.getAssignableRoles(userId);
@@ -1758,6 +1803,12 @@ class User {
     }
 
     this.roles = newRoles;
+    // Clear memoized permission state so expandFromRoles recomputes from the
+    // new roles instead of early-returning on the startup expansion
+    this.#allRoles = undefined;
+    this.#allExpression = undefined;
+    this.#allTimeLimit = undefined;
+    this.#allSettings = {};
     await this.expandFromRoles();
     await new Promise((resolve, reject) => {
       this.save((err) => {
@@ -1813,12 +1864,12 @@ function cleanUser (user) {
   user.expression = user.expression || '';
   user.timeLimit = user.timeLimit || undefined;
 
-  // By default give to all user stuff if never had roles
+  // By default give access to all user stuff if the user never had roles
   if (user.roles === undefined) {
     user.roles = isRole ? [] : ['arkimeUser', 'cont3xtUser', 'parliamentUser', 'wiseUser'];
   }
 
-  // Convert createEnable to usersAdmin role
+  // Convert createEnabled to usersAdmin role
   if (user.createEnabled && !user.roles.includes('usersAdmin')) {
     user.roles.push('usersAdmin');
   }
@@ -2003,6 +2054,29 @@ class UserESImplementation {
     return { users: hits, total: users.hits.total };
   }
 
+  // Return ALL users with full raw data (incl passStore/cont3xt), promise only
+  async getAllUsers () {
+    const users = [];
+    let resp = await this.client.search({
+      index: this.prefix + 'users',
+      scroll: '5m',
+      body: { size: 1000, query: { match_all: {} } }
+    });
+
+    while (resp.body.hits.hits.length > 0) {
+      for (const hit of resp.body.hits.hits) {
+        users.push(hit._source);
+      }
+      resp = await this.client.scroll({ scroll_id: resp.body._scroll_id, scroll: '5m' });
+    }
+
+    if (resp.body?._scroll_id) {
+      try { await this.client.clearScroll({ body: { scroll_id: [resp.body._scroll_id] } }); } catch (err) { /* ignore */ }
+    }
+
+    return users;
+  }
+
   // Return a user from DB, callback only
   getUser (userId, cb) {
     this.client.get({ index: this.prefix + 'users', id: userId }, (err, result) => {
@@ -2140,6 +2214,15 @@ class UserLMDBImplementation {
     };
   }
 
+  // Return ALL users with full raw data (incl passStore/cont3xt), promise only
+  async getAllUsers () {
+    const users = [];
+    this.store.getRange({}).forEach(({ key, value }) => {
+      users.push(value);
+    });
+    return users;
+  }
+
   // Return a user from DB, callback only
   getUser (userId, cb) {
     try {
@@ -2251,6 +2334,18 @@ class UserRedisImplementation {
       total: hits.length,
       users: hits.slice(from, from + size)
     };
+  }
+
+  // Return ALL users with full raw data (incl passStore/cont3xt), promise only
+  async getAllUsers () {
+    const keys = await this.client.keys(this.prefix + '*');
+    const users = [];
+    for (const key of keys) {
+      const data = await this.client.get(key);
+      if (!data) { continue; }
+      users.push(JSON.parse(data));
+    }
+    return users;
   }
 
   // Return a user from DB, callback only
@@ -2371,6 +2466,12 @@ class UserSQLiteImplementation {
       total: hits.length,
       users: hits.slice(from, from + size)
     };
+  }
+
+  // Return ALL users with full raw data (incl passStore/cont3xt), promise only
+  async getAllUsers () {
+    const rows = this.db.prepare('SELECT json FROM users').all();
+    return rows.map(row => JSON.parse(row.json));
   }
 
   // Return a user from DB, callback only

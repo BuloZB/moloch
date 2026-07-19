@@ -20,7 +20,7 @@
      },
      "ip" : "10.0.0.2",
      "mac" : [
-      "c2:00:57:75:00:00"
+      "c2:01:57:75:00:00"
      ],
      "mac-cnt" : 1,
      "packets" : 5,
@@ -75,7 +75,7 @@
      },
      "ip" : "10.0.0.1",
      "mac" : [
-      "c2:01:57:75:00:00"
+      "c2:00:57:75:00:00"
      ],
      "mac-cnt" : 1,
      "packets" : 5,
@@ -88,9 +88,10 @@
     "tags" : [
      "dstip",
      "srcip",
-     "truncated-pcap"
+     "truncated-pcap",
+     "zeek:intel"
     ],
-    "tagsCnt" : 3,
+    "tagsCnt" : 4,
     "test" : {
      "ASN" : [
       "AS0 This is neat"
@@ -111,7 +112,31 @@
       "16777226:0,33554442:0"
      ]
     },
-    "totDataBytes" : 1520
+    "totDataBytes" : 1520,
+    "zeekintel" : [
+     {
+      "desc" : "matches 10.0.0.x test traffic",
+      "indicator" : "10.0.0.0/24",
+      "indicator_type" : "subnet",
+      "source" : "arkime-test",
+      "where" : "ip.dst"
+     },
+     {
+      "desc" : "matches 10.0.0.x test traffic",
+      "indicator" : "10.0.0.0/24",
+      "indicator_type" : "subnet",
+      "source" : "arkime-test",
+      "where" : "ip.src"
+     },
+     {
+      "desc" : "matches 10.0.0.x test traffic",
+      "indicator" : "10.0.0.0/24",
+      "indicator_type" : "subnet",
+      "source" : "arkime-test",
+      "where" : "test.ip"
+     }
+    ],
+    "zeekintelCnt" : 3
    },
    "header" : {
     "index" : {

@@ -51,6 +51,8 @@ LOCAL void reader_libpcapfile_monitor_dir(char *dirname);
 LOCAL void reader_libpcapfile_monitor_do(struct inotify_event *event)
 {
     gchar *dirname = g_hash_table_lookup(wdHashTable, (void *)(long)event->wd);
+    if (!dirname)
+        return;
     gchar *fullfilename = g_build_filename(dirname, event->name, NULL);
 
     if (config.pcapRecursive &&
@@ -163,9 +165,9 @@ LOCAL void reader_libpcapfile_init_monitor()
 LOCAL void reader_libpcapfile_init_monitor()
 {
     if (config.commandSocket || config.commandList)
-        LOG("ERROR - Monitoring not supporting on this OS");
+        LOG("ERROR - Monitoring not supported on this OS");
     else
-        LOGEXIT("ERROR - Monitoring not supporting on this OS");
+        LOGEXIT("ERROR - Monitoring not supported on this OS");
 }
 #endif
 /******************************************************************************/
@@ -332,8 +334,10 @@ fileListsDone:
 
             // If recursive option and a directory then process all the files in that dir
             if (config.pcapRecursive && g_file_test(fullfilename, G_FILE_TEST_IS_DIR)) {
-                if (pcapGDirLevel >= 20)
+                if (pcapGDirLevel >= 20) {
+                    g_free(fullfilename);
                     continue;
+                }
                 pcapBase[pcapGDirLevel + 1] = fullfilename;
                 pcapGDirLevel++;
                 return reader_libpcapfile_next();
@@ -417,8 +421,6 @@ LOCAL int reader_libpcapfile_stats(ArkimeReaderStats_t *stats)
 /******************************************************************************/
 LOCAL void reader_libpcapfile_pcap_cb(u_char *UNUSED(user), const struct pcap_pkthdr *h, const u_char *bytes)
 {
-    ArkimePacket_t *packet = arkime_packet_alloc();
-
     if (unlikely(h->caplen != h->len) && !config.readTruncatedPackets && !config.ignoreErrors) {
         LOGEXIT("ERROR - Arkime requires full packet captures caplen: %d pktlen: %d. "
                 "If using tcpdump use the \"-s0\" option, or set readTruncatedPackets in ini file",
@@ -429,6 +431,8 @@ LOCAL void reader_libpcapfile_pcap_cb(u_char *UNUSED(user), const struct pcap_pk
         return;
     }
 
+    ArkimePacket_t *packet = arkime_packet_alloc();
+
     offlineInfo[readerPos].lastPackets++;
     offlineInfo[readerPos].lastPacketTime = h->ts;
 
@@ -437,7 +441,7 @@ LOCAL void reader_libpcapfile_pcap_cb(u_char *UNUSED(user), const struct pcap_pk
     /* libpcap casts to int32_t which sign extends, undo that */
     packet->ts.tv_sec     = (uint32_t)h->ts.tv_sec;
     packet->ts.tv_usec    = h->ts.tv_usec;
-    packet->readerFilePos = ftell(offlineFile) - 16 - h->len;
+    packet->readerFilePos = ftell(offlineFile) - 16 - h->caplen;
     packet->readerPos     = readerPos;
 
     offlineInfo[readerPos].lastBytes += packet->pktlen + 16;

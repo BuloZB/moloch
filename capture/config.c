@@ -162,8 +162,8 @@ LOCAL IpProtocolEntry_t ipProtocols[] = {
     {"st", 5},
     {"stp", 118},
     {"sun-nd", 77},
-    {"tcp", 6},
     {"tcf", 87},
+    {"tcp", 6},
     {"tlsp", 56},
     {"tp++", 39},
     {"ttp", 84},
@@ -764,7 +764,10 @@ LOCAL gboolean arkime_config_load_yaml(GKeyFile *keyfile, char *data, GError **U
                 BSB_EXPORT_u08(bsb, 0);
                 if (BSB_IS_ERROR(bsb)) {
                     LOG("WARNING - YAML sequence value too long for %s:%s, truncating", section, key);
-                    buf[sizeof(buf) - 1] = 0;
+                    if (BSB_LENGTH(bsb) < (long)sizeof(buf))
+                        buf[BSB_LENGTH(bsb)] = 0;
+                    else
+                        buf[sizeof(buf) - 1] = 0;
                 }
 #ifdef CONFIG_DEBUG
                 LOG("%s:%s => %s", section, key, buf);
@@ -1026,7 +1029,7 @@ LOCAL void arkime_config_load()
 
         if (!data || code != 200) {
             free(data);
-            CONFIGEXIT("Couldn't download from code: %d host: %s url: %s", code, host, end);
+            CONFIGEXIT("Couldn't download, code: %d host: %s url: %s", code, host, end);
         }
 
         if (g_str_has_suffix(config.configFile, ".ini"))
@@ -1085,7 +1088,7 @@ LOCAL void arkime_config_load()
         if (environ[e][7] == '_') {
             key = g_string_new_len(environ[e] + 8, equal - environ[e] - 8);
         } else {
-            const char *underunder = strstr(environ[e] + 7, "__");
+            const char *underunder = g_strstr_len(environ[e] + 7, equal - (environ[e] + 7), "__");
             if (!underunder)
                 continue;
 
@@ -1503,7 +1506,7 @@ LOCAL void arkime_config_parse_packet_ips(GKeyFile *keyFile)
         for (v = 0; v < values_len; v++) {
             if (strncmp(values[v], "drop", 4) == 0) {
 
-            } else if (strncmp(values[v], "allow", 4) == 0) {
+            } else if (strncmp(values[v], "allow", 5) == 0) {
                 mode = 1;
             } else {
                 CONFIGEXIT("Unknown argument to packet-drop-ips %s %s", keys[k], values[v]);
@@ -1519,7 +1522,7 @@ void arkime_config_load_packet_ips()
 {
     GError *error = 0;
 
-    if (g_key_file_has_group(arkimeKeyFile, "packet-ips")) {
+    if (g_key_file_has_group(arkimeKeyFile, "packet-drop-ips")) {
         arkime_config_parse_packet_ips(arkimeKeyFile);
     }
 
@@ -1556,7 +1559,7 @@ void arkime_config_add_header(ArkimeStringHashStd_t *hash, char *key, int pos)
     HASH_ADD(s_, *hash, hstring->str, hstring);
 }
 /******************************************************************************/
-void arkime_config_load_header(char *section, char *group, char *helpBase, char *expBase, char *aliasBase, char *dbBase, ArkimeStringHashStd_t *hash, int flags)
+void arkime_config_load_header(char *section, char *group, const char *helpBase, const char *expBase, const char *aliasBase, const char *dbBase, ArkimeStringHashStd_t *hash, int flags)
 {
     GError   *error = 0;
     char      name[100];
@@ -1583,7 +1586,7 @@ void arkime_config_load_header(char *section, char *group, char *helpBase, char 
         ArkimeFieldType t = ARKIME_FIELD_TYPE_INT;
         int unique = 1;
         int count  = 0;
-        char *kind = 0;
+        const char *kind = 0;
         for (v = 0; v < values_len; v++) {
             if (strcmp(values[v], "type:integer") == 0 ||
                 strcmp(values[v], "type:seconds") == 0 ||
@@ -2023,7 +2026,7 @@ void arkime_config_init()
     }
 
     if (!config.pcapDir || !config.pcapDir[0]) {
-        CONFIGEXIT("You must set a non empty pcapDir= in the config file(%s) to save files to. You need to fix this before Arkime can continue.", config.configFile);
+        CONFIGEXIT("You must set a non empty pcapDir= in the config file (%s) to save files to. You need to fix this before Arkime can continue.", config.configFile);
     }
 
     if (!config.dryRun) {

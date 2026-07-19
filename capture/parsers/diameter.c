@@ -121,12 +121,14 @@ LOCAL const char *diameter_app_name(uint32_t appId)
         return "3GPP-S13";
     case 16777255:
         return "3GPP-SLg";
-    case 16777265:
+    case 16777264:
         return "3GPP-SWm";
-    case 16777272:
+    case 16777265:
         return "3GPP-SWx";
-    case 16777291:
+    case 16777272:
         return "3GPP-S6b";
+    case 16777291:
+        return "3GPP-SLh";
     default:
         return NULL;
     }
@@ -255,7 +257,8 @@ LOCAL int diameter_tcp_parser(ArkimeSession_t *session, void *uw, const uint8_t 
 {
     ArkimeParserBuf_t *pb = uw;
 
-    arkime_parser_buf_add(pb, which, data, remaining);
+    if (arkime_parser_buf_add(pb, which, data, remaining) < 0)
+        return ARKIME_PARSER_UNREGISTER;
 
     while (pb->len[which] >= 20) {
         const uint8_t *msg = pb->buf[which];

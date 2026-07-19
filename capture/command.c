@@ -123,7 +123,7 @@ LOCAL gboolean arkime_command_server_read_cb(gint UNUSED(fd), GIOCondition UNUSE
         } else {
             LOG("ERROR - Error accepting command");
         }
-        return FALSE;
+        return TRUE;
     }
 
     CommandClient_t *cc = ARKIME_TYPE_ALLOC0(CommandClient_t);
@@ -356,7 +356,9 @@ LOCAL void arkime_command_help(int argc, char **argv, gpointer cc)
 /******************************************************************************/
 LOCAL void arkime_command_exit(int UNUSED(argc), char UNUSED(**argv), gpointer cc)
 {
-    arkime_command_client_free(cc);
+    // commandList runs commands with no client connection (cc == NULL); nothing to close
+    if (cc)
+        arkime_command_client_free(cc);
 }
 /******************************************************************************/
 GSocketAddress *g_unix_socket_address_new (const gchar *path);

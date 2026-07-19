@@ -51,8 +51,11 @@ class UserAPIs {
   static getCurrentUserCB (user, clone) {
     clone.canUpload = internals.allowUploads && user.hasRole(internals.uploadRoles);
 
-    // If esAdminUser is set use that, otherwise use arkimeAdmin privilege
-    if (internals.esAdminUsersSet) {
+    // dbAdmin always grants es admin access; otherwise if esAdminUsers is set use
+    // that, else fall back to arkimeAdmin privilege
+    if (user.hasRole('dbAdmin')) {
+      clone.esAdminUser = true;
+    } else if (internals.esAdminUsersSet) {
       clone.esAdminUser = internals.esAdminUsers.includes(user.userId);
     } else {
       clone.esAdminUser = user.hasRole('arkimeAdmin');
@@ -628,7 +631,7 @@ class UserAPIs {
    * @name /user/layouts/:type
    * @returns {boolean} success - Whether the operation was successful.
    * @returns {string} text - The success/error message to (optionally) display to the user.
-   * @returns {object} layout - The new layout configuration.
+   * @returns {string} name - The name of the new layout.
    */
   static createUserLayout (req, res) {
     let result;
@@ -790,6 +793,11 @@ class UserAPIs {
       User.setUser(req.params.userId, user, (err, info) => {
         if (Config.debug) {
           console.log(`${req.method} /api/user/%s/acknowledge (setUser)`, ArkimeUtil.sanitizeStr(req.params.userId), util.inspect(err, false, 50), user, info);
+        }
+
+        if (err) {
+          console.log(`ERROR - ${req.method} /api/user/%s/acknowledge (setUser)`, ArkimeUtil.sanitizeStr(req.params.userId), util.inspect(err, false, 50));
+          return res.serverError(500, 'Error dismissing message');
         }
 
         return res.json({

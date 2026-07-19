@@ -17,66 +17,62 @@ LOCAL int camelCallingField;
 LOCAL int camelCalledField;
 LOCAL int camelImsiField;
 
-// CAP/CAMEL Operation Codes (from ETSI TS 101 046)
+// CAP/CAMEL Operation Codes (from 3GPP TS 29.078, CAP-operationcodes)
 LOCAL const char *camel_op_names[] = {
     [0]  = "initialDP",
-    [1]  = "assistRequestInstructions",
-    [2]  = "establishTemporaryConnection",
-    [3]  = "disconnectForwardConnection",
-    [4]  = "connectToResource",
-    [5]  = "connect",
-    [6]  = "releaseCall",               // CAP v1
-    [7]  = "requestReportBCSMEvent",    // CAP v1
-    [8]  = "eventReportBCSM",           // CAP v1
-    [9]  = "requestNotificationChargingEvent", // CAP v1
-    [10] = "eventNotificationCharging", // CAP v1
-    [11] = "cancel",                    // CAP v1
-    [12] = "furnishChargingInformation",
-    [13] = "applyCharging",             // CAP v1
-    [14] = "applyChargingReport",       // CAP v1
-    [16] = "callGap",
-    [17] = "connect",                   // CAP v2+
-    [20] = "continue",
-    [21] = "initiateCallAttempt",
-    [22] = "releaseCall",               // CAP v2+
-    [23] = "requestReportBCSMEvent",    // CAP v2+
-    [24] = "eventReportBCSM",           // CAP v2+
-    [31] = "resetTimer",
-    [32] = "sendChargingInformation",
-    [33] = "connectToResource",         // CAP v2+
-    [34] = "furnishChargingInformation",// CAP v2+
-    [35] = "applyCharging",             // CAP v2+
-    [36] = "applyChargingReport",       // CAP v2+
-    [44] = "callInformationRequest",
-    [45] = "callInformationReport",
-    [46] = "playAnnouncement",
-    [47] = "promptAndCollectUserInformation",
-    [48] = "specializedResourceReport",
-    [49] = "cancel",                    // CAP v2+
-    [56] = "activityTest",
-    [60] = "continueWithArgument",
-    [61] = "disconnectLeg",
-    [62] = "initiateSMS",               // SMS operations
-    [63] = "releaseSMS",
-    [64] = "connectSMS",
-    [65] = "requestReportSMSEvent",
-    [66] = "eventReportSMS",
-    [67] = "continueSMS",
-    [70] = "initialDPSMS",
-    [71] = "furnishChargingInformationSMS",
-    [80] = "initialDPGPRS",             // GPRS operations
+    [16] = "assistRequestInstructions",
+    [17] = "establishTemporaryConnection",
+    [18] = "disconnectForwardConnection",
+    [19] = "connectToResource",
+    [20] = "connect",
+    [22] = "releaseCall",
+    [23] = "requestReportBCSMEvent",
+    [24] = "eventReportBCSM",
+    [27] = "collectInformation",
+    [31] = "continue",
+    [32] = "initiateCallAttempt",
+    [33] = "resetTimer",
+    [34] = "furnishChargingInformation",
+    [35] = "applyCharging",
+    [36] = "applyChargingReport",
+    [41] = "callGap",
+    [44] = "callInformationReport",
+    [45] = "callInformationRequest",
+    [46] = "sendChargingInformation",
+    [47] = "playAnnouncement",
+    [48] = "promptAndCollectUserInformation",
+    [49] = "specializedResourceReport",
+    [53] = "cancel",
+    [55] = "activityTest",
+    [60] = "initialDPSMS",               // SMS operations
+    [61] = "furnishChargingInformationSMS",
+    [62] = "connectSMS",
+    [63] = "requestReportSMSEvent",
+    [64] = "eventReportSMS",
+    [65] = "continueSMS",
+    [66] = "releaseSMS",
+    [67] = "resetTimerSMS",
+    [70] = "activityTestGPRS",           // GPRS operations
+    [71] = "applyChargingGPRS",
+    [72] = "applyChargingReportGPRS",
+    [73] = "cancelGPRS",
+    [74] = "connectGPRS",
+    [75] = "continueGPRS",
+    [76] = "entityReleasedGPRS",
+    [77] = "furnishChargingInformationGPRS",
+    [78] = "initialDPGPRS",
+    [79] = "releaseGPRS",
+    [80] = "eventReportGPRS",
     [81] = "requestReportGPRSEvent",
-    [82] = "eventReportGPRS",
-    [83] = "applyChargingGPRS",
-    [84] = "applyChargingReportGPRS",
-    [85] = "furnishChargingInformationGPRS",
-    [86] = "cancelGPRS",
-    [87] = "connectGPRS",
-    [88] = "continueGPRS",
-    [89] = "releaseGPRS",
-    [90] = "resetTimerGPRS",
-    [91] = "sendChargingInformationGPRS",
-    [93] = "activityTestGPRS",
+    [82] = "resetTimerGPRS",
+    [83] = "sendChargingInformationGPRS",
+    [86] = "dFCWithArgument",
+    [88] = "continueWithArgument",
+    [90] = "disconnectLeg",
+    [93] = "moveLeg",
+    [95] = "splitLeg",
+    [96] = "entityReleased",
+    [97] = "playTone",
 };
 
 /******************************************************************************/
@@ -160,26 +156,29 @@ LOCAL void camel_parse_cap_params(ArkimeSession_t *session, const uint8_t *data,
         case 0x82: // [2] calledPartyNumber
         case 0xA2:
             if (lenVal > 2) {
-                int skip = (valData[0] & 0x80) ? 1 : 2;
-                if (lenVal > skip) {
-                    BSB_INIT(numbsb, numBuf, sizeof(numBuf));
-                    decode_tbcd(valData + skip, lenVal - skip, &numbsb);
-                    if (numBuf[0] && !BSB_IS_ERROR(numbsb))
-                        arkime_field_string_add(camelCalledField, session, numBuf, -1, TRUE);
-                }
+                // ISUP Q.763 format: 2 fixed header bytes; 0x80 in byte 0 is the
+                // odd digit-count indicator (last high nibble is filler)
+                BSB_INIT(numbsb, numBuf, sizeof(numBuf));
+                decode_tbcd(valData + 2, lenVal - 2, &numbsb);
+                int digits = (lenVal - 2) * 2 - ((valData[0] & 0x80) ? 1 : 0);
+                if (digits < (int)sizeof(numBuf))
+                    numBuf[digits] = 0;
+                if (numBuf[0] && !BSB_IS_ERROR(numbsb))
+                    arkime_field_string_add(camelCalledField, session, numBuf, -1, TRUE);
             }
             break;
 
         case 0x83: // [3] callingPartyNumber
         case 0xA3:
             if (lenVal > 2) {
-                int skip = (valData[0] & 0x80) ? 1 : 2;
-                if (lenVal > skip) {
-                    BSB_INIT(numbsb, numBuf, sizeof(numBuf));
-                    decode_tbcd(valData + skip, lenVal - skip, &numbsb);
-                    if (numBuf[0] && !BSB_IS_ERROR(numbsb))
-                        arkime_field_string_add(camelCallingField, session, numBuf, -1, TRUE);
-                }
+                // ISUP Q.763 format, same as calledPartyNumber above
+                BSB_INIT(numbsb, numBuf, sizeof(numBuf));
+                decode_tbcd(valData + 2, lenVal - 2, &numbsb);
+                int digits = (lenVal - 2) * 2 - ((valData[0] & 0x80) ? 1 : 0);
+                if (digits < (int)sizeof(numBuf))
+                    numBuf[digits] = 0;
+                if (numBuf[0] && !BSB_IS_ERROR(numbsb))
+                    arkime_field_string_add(camelCallingField, session, numBuf, -1, TRUE);
             }
             break;
 
@@ -269,6 +268,7 @@ LOCAL int camel_parser(ArkimeSession_t *session, void *uw, const uint8_t *data, 
                     BSB_IMPORT_bsb(compBsb, invBsb, MIN(compLen, BSB_REMAINING(compBsb)));
 
                     int currentOpcode = -1;
+                    int sawInvokeId = 0;
                     while (BSB_REMAINING(invBsb) >= 3) {
                         uint8_t invTag = 0;
                         BSB_IMPORT_u08(invBsb, invTag);
@@ -287,7 +287,13 @@ LOCAL int camel_parser(ArkimeSession_t *session, void *uw, const uint8_t *data, 
                             }
                         }
 
-                        if (invTag == 0x02 && invLen >= 1 && invLen <= 2) {
+                        if (invTag == 0x02 && invLen >= 1 && invLen <= 2 && !sawInvokeId) {
+                            // The first INTEGER in an Invoke/ReturnResult component is the
+                            // invokeID (ITU-T Q.773), not the operationCode; skip it so it
+                            // isn't mis-recorded as a camel.op / tcap.opcode value.
+                            sawInvokeId = 1;
+                            BSB_IMPORT_skip(invBsb, invLen);
+                        } else if (invTag == 0x02 && invLen >= 1 && invLen <= 2) {
                             int opcode = 0;
                             for (uint32_t i = 0; i < invLen && BSB_REMAINING(invBsb) > 0; i++) {
                                 uint8_t b = 0;
@@ -304,7 +310,7 @@ LOCAL int camel_parser(ArkimeSession_t *session, void *uw, const uint8_t *data, 
                         } else if (invTag == 0x30 && invLen > 0) {
                             const uint8_t *caps = 0;
                             BSB_IMPORT_ptr(invBsb, caps, invLen);
-                            if (caps && (currentOpcode == 0 || currentOpcode == 70 || currentOpcode == 80)) {
+                            if (caps && (currentOpcode == 0 || currentOpcode == 60 || currentOpcode == 78)) {
                                 camel_parse_cap_params(session, caps, invLen);
                             }
                         } else {

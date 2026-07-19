@@ -1,4 +1,4 @@
-use Test::More tests => 40;
+use Test::More tests => 42;
 use Cwd;
 use URI::Escape;
 use ArkimeTest;
@@ -48,14 +48,14 @@ my $files = uri_escape($filestr);
 # empty
 my $txt = get("");
 my $ptxt = post('{}');
-is ($txt, "Missing exp parameter\n", "unique.txt node exp parameter");
+is ($txt, "Missing exp parameter\n", "multiunique.txt node exp parameter");
 eq_or_diff($txt, $ptxt, "GET and POST versions of multiunique endpoint are not the same");
 
 
 # empty exp
 $txt = get("exp=");
 $ptxt = post('{"exp": ""}');
-is ($txt, "Missing exp parameter\n", "unique.txt node exp empty");
+is ($txt, "Missing exp parameter\n", "multiunique.txt node exp empty");
 eq_or_diff($txt, $ptxt, "GET and POST versions of multiunique endpoint are not the same");
 
 # bad post - exp
@@ -111,6 +111,7 @@ srcip, 4
 wisebyhost2, 7
 wisebyip1, 1
 wisebyip3, 2
+zeek:intel, 14
 ", "tags count", { context => 3 });
 
 #
@@ -210,3 +211,11 @@ $txt = get("date=-1&exp=http.user-agent&view=unknown");
 eq_or_diff($txt,
 'Can\'t find view
 ');
+
+# A malformed expression makes arkimeparser.parse throw an Error object. That
+# Error used to be passed straight to res.end, which crashed the compression
+# middleware with an unhandled rejection (PR #4120). It should now come back as
+# a 400 with the parse-error text.
+my $res = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8123/multiunique.txt?date=-1&exp=node&expression=" . uri_escape("ip.src=="));
+is($res->code, 400, "multiunique malformed expression returns 400");
+ok($res->content =~ /Parse error/, "multiunique malformed expression returns parse-error text, not a crash");

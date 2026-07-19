@@ -1,5 +1,5 @@
 # Test cont3xt.js
-use Test::More tests => 218;
+use Test::More tests => 227;
 use Test::Differences;
 use Data::Dumper;
 use ArkimeTest;
@@ -89,6 +89,15 @@ $json = cont3xtPutToken("/api/linkGroup", to_json({
   viewRoles => ["cont3xtUser"],
   editRoles => ["superAdmin"],
   links => [1]
+}), $token);
+eq_or_diff($json, from_json('{"success": false, "text": "Link must be object"}'));
+
+# a null link must be rejected, not throw (typeof null === 'object')
+$json = cont3xtPutToken("/api/linkGroup", to_json({
+  name => "Links1",
+  viewRoles => ["cont3xtUser"],
+  editRoles => ["superAdmin"],
+  links => [undef]
 }), $token);
 eq_or_diff($json, from_json('{"success": false, "text": "Link must be object"}'));
 
@@ -544,6 +553,68 @@ $json = cont3xtPutToken("/api/overview", to_json({
 }), $token);
 eq_or_diff($json, from_json('{"success": false, "text": "Custom field must not have alias"}'));
 
+# custom.fields must be an array - a string used to crash the process (iterated char-by-char then assigned to a string index)
+$json = cont3xtPutToken("/api/overview", to_json({
+    name => "Overview1",
+    title => "Overview of %{query}",
+    iType => "domain",
+    viewRoles => ["cont3xtUser"],
+    editRoles => ["superAdmin"],
+    fields => [{
+        type   => "custom",
+        from => "Foo",
+        custom => {
+            label  => "foo name",
+            fields => "abc"
+        }
+    }]
+}), $token);
+eq_or_diff($json, from_json('{"success": false, "text": "Custom fields must be an array when present"}'));
+
+# custom.join is a string separator (like every integration card), not a boolean
+$json = cont3xtPutToken("/api/overview", to_json({
+    name => "Overview1",
+    title => "Overview of %{query}",
+    iType => "domain",
+    viewRoles => ["cont3xtUser"],
+    editRoles => ["superAdmin"],
+    fields => [{
+        type   => "custom",
+        from => "Foo",
+        custom => {
+            label => "foo name",
+            field => "foo.bar",
+            type  => "array",
+            join  => JSON::true
+        }
+    }]
+}), $token);
+eq_or_diff($json, from_json('{"success": false, "text": "Custom join must be a string when present"}'));
+
+# custom.join with a string separator must be accepted
+$json = cont3xtPutToken("/api/overview", to_json({
+    name => "OverviewJoin",
+    title => "Overview of %{query}",
+    iType => "domain",
+    viewRoles => ["cont3xtUser"],
+    editRoles => ["superAdmin"],
+    fields => [{
+        type   => "custom",
+        from => "Foo",
+        custom => {
+            label => "foo name",
+            field => "foo.bar",
+            type  => "array",
+            join  => ", "
+        }
+    }]
+}), $token);
+eq_or_diff($json, from_json('{"success": true, "text": "Success"}'));
+$json = cont3xtGet('/api/overview');
+my $joinOverviewId = $json->{overviews}->[0]->{_id};
+$json = cont3xtDeleteToken("/api/overview/$joinOverviewId", "{}", $token);
+eq_or_diff($json, from_json('{"success": true, "text": "Success"}'));
+
 $json = cont3xtPutToken("/api/overview", to_json({
     name => "Overview1",
     title => "Overview of %{query}",
@@ -749,7 +820,7 @@ $json = cont3xtGet('/api/roles');
 eq_or_diff($json, from_json('{"success": false, "text": "Missing token"}'));
 
 $json = cont3xtGetToken('/api/roles', $token);
-eq_or_diff($json, from_json('{"success": true, "roles": ["arkimeAdmin","arkimeUser","cont3xtAdmin","cont3xtUser","parliamentAdmin","parliamentUser","superAdmin","usersAdmin","wiseAdmin","wiseUser"]}'));
+eq_or_diff($json, from_json('{"success": true, "roles": ["arkimeAdmin","arkimeUser","cont3xtAdmin","cont3xtUser","dbAdmin","parliamentAdmin","parliamentUser","superAdmin","usersAdmin","wiseAdmin","wiseUser"]}'));
 
 ################################################################################
 ### INTEGRATION
@@ -1004,6 +1075,11 @@ $json = cont3xtGet('/api/audits?sortBy=issuedAt&sortOrder=desc');
 is($json->{success}, 1);
 ok($json->{audits}->[0]->{issuedAt} >= $json->{audits}->[-1]->{issuedAt}, "sorted descending by issuedAt");
 
+# default sort (no sortBy/sortOrder) is issuedAt descending
+$json = cont3xtGet('/api/audits');
+is($json->{success}, 1);
+ok($json->{audits}->[0]->{issuedAt} >= $json->{audits}->[-1]->{issuedAt}, "default sorted descending by issuedAt");
+
 # pagination
 $json = cont3xtGet('/api/audits?page=1&itemsPerPage=2');
 is($json->{success}, 1);
@@ -1013,6 +1089,11 @@ is ($json->{total}, 3, "total is still 3");
 $json = cont3xtGet('/api/audits?page=2&itemsPerPage=2');
 is($json->{success}, 1);
 is (scalar @{$json->{audits}}, 1, "page 2 has 1 item");
+
+# itemsPerPage=-1 returns all audits
+$json = cont3xtGet('/api/audits?itemsPerPage=-1');
+is($json->{success}, 1);
+is (scalar @{$json->{audits}}, 3, "itemsPerPage=-1 returns all items");
 
 # combined date range + search
 $json = cont3xtGet("/api/audits?startMs=" . ($minTime - 1) . "&stopMs=" . ($maxTime + 1) . "&searchTerm=goodtag");

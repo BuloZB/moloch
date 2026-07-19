@@ -100,9 +100,10 @@ class HuntAPIs {
       return cb(null, false);
     } else if (options.type === 'raw') {
       const packets = [];
-      SessionAPIs.processSessionId(sessionId, true, null, (pcap, buffer, processSessionIdCb, i) => {
+      SessionAPIs.processSessionId(sessionId, false, null, (pcap, buffer, processSessionIdCb, i) => {
         if (options.src === options.dst) {
-          packets.push(buffer);
+          // strip the 16 byte pcap record header, only packet data should be searched
+          packets.push(buffer.slice(16));
         } else {
           const packet = {};
           pcap.decode(buffer, packet);
@@ -112,7 +113,7 @@ class HuntAPIs {
         processSessionIdCb(null);
       }, (err, session) => {
         if (err) {
-          return; /* cb(null, false); */
+          return cb(null, false);
         }
 
         const len = packets.length;
@@ -218,7 +219,7 @@ ${Config.arkimeWebURL()}hunt
     }
 
     // update the hunt with number of matchedSessions and searchedSessions
-    // and the date of the first packet of the last searched session
+    // and the date of the last packet of the last searched session
     const lastPacketTime = session.lastPacket;
     const now = Math.floor(Date.now() / 1000);
 
@@ -357,9 +358,10 @@ ${Config.arkimeWebURL()}hunt
     const failedSessions = JSON.parse(JSON.stringify(hunt.failedSessionIds));
     // we don't need to search the db for session, we just need to search each session in failedSessionIds
     async.forEachLimit(failedSessions, 3, (sessionId, cb) => {
-      Db.getSession(sessionId, { arkime_unflatten: true, _source: false, fields: 'node,huntName,huntId,lastPacket,field'.split(',') }, async (err, session) => {
+      Db.getSession(sessionId, { arkime_unflatten: true, _source: false, fields: 'node,huntName,huntId,lastPacket,fileId'.split(',') }, async (err, session) => {
         if (err) {
-          const result = await HuntAPIs.#continueHuntSkipSession(hunt, huntId, session, sessionId, searchedSessions);
+          // session is undefined on error, pass a stub so #updateHuntStats doesn't throw
+          const result = await HuntAPIs.#continueHuntSkipSession(hunt, huntId, {}, sessionId, searchedSessions);
           return cb(result);
         }
 
@@ -368,11 +370,11 @@ ${Config.arkimeWebURL()}hunt
         const huntRemotePath = `api/hunt/${session.node}/${huntId}/remote/${sessionId}`;
 
         if (Config.debug > 1) {
-          console.log('HUNT - remote', huntRemotePath);
+          console.log('HUNT - failed remote', huntRemotePath);
         }
         ViewerUtils.makeRequest(session.node, huntRemotePath, user, async (err, response) => {
           if (Config.debug > 1) {
-            console.log('HUNT - remote response', huntRemotePath, err, response);
+            console.log('HUNT - failed remote response', huntRemotePath, err, response);
           }
           if (err) {
             const updateResult = await HuntAPIs.#continueHuntSkipSession(hunt, huntId, session, sessionId, searchedSessions);
@@ -430,7 +432,12 @@ ${Config.arkimeWebURL()}hunt
 *${hunt.matchedSessions}* matched sessions out of *${hunt.searchedSessions}* searched sessions.
 ${Config.arkimeWebURL()}sessions?expression=huntId==${huntId}&stopTime=${hunt.query.stopTime}&startTime=${hunt.query.startTime}
           `;
-          Notifier.issueAlert(hunt.notifier, message, continueProcess);
+          // Handle multiple notifiers (stored as comma-separated string)
+          const notifiers = hunt.notifier.split(',');
+          for (const notifierId of notifiers) {
+            Notifier.issueAlert(notifierId, message, () => {});
+          }
+          continueProcess();
         } else {
           return continueProcess();
         }
@@ -516,11 +523,11 @@ ${Config.arkimeWebURL()}sessions?expression=huntId==${huntId}&stopTime=${hunt.qu
             const huntRemotePath = `api/hunt/${node}/${huntId}/remote/${sessionId}`;
 
             if (Config.debug > 1) {
-              console.log('HUNT - failed remote', huntRemotePath);
+              console.log('HUNT - remote', huntRemotePath);
             }
             ViewerUtils.makeRequest(node, huntRemotePath, user, async (err, response) => {
               if (Config.debug > 1) {
-                console.log('HUNT - failed remote response', huntRemotePath, err, response);
+                console.log('HUNT - remote response', huntRemotePath, err, response);
               }
               if (err) {
                 const skipResult = await HuntAPIs.#continueHuntSkipSession(hunt, huntId, session, sessionId, searchedSessions);
@@ -786,7 +793,7 @@ ${Config.arkimeWebURL()}sessions?expression=huntId==${huntId}&stopTime=${hunt.qu
    * @property {number} matchedSessions - How many sessions contain packets that match the search text.
    * @property {number} searchedSessions - How many sessions have had their packets searched.
    * @property {number} totalSessions - The number of sessions to search.
-   * @property {number} lastPacketTime - The date of the first packet of the last searched session. Used to query for the next chunk of sessions to search. Format is seconds since Unix EPOCH.
+   * @property {number} lastPacketTime - The date of the last packet of the last searched session. Used to query for the next chunk of sessions to search. Format is milliseconds since Unix EPOCH.
    * @property {number} created - The time that the hunt was created. Format is seconds since Unix EPOCH.
    * @property {number} lastUpdated - The time that the hunt was last updated in the DB. Used to only update every 2 seconds. Format is seconds since Unix EPOCH.
    * @property {number} started - The time that the hunt was started (put into running state). Format is seconds since Unix EPOCH.
@@ -821,7 +828,7 @@ ${Config.arkimeWebURL()}sessions?expression=huntId==${huntId}&stopTime=${hunt.qu
      hex - search for hex text.
      regex - search for text using <a href="https://github.com/google/re2/wiki/Syntax">safe regex</a>.
      hexregex - search for text using <a href="https://github.com/google/re2/wiki/Syntax">safe hex regex</a>.
-   * @param {string} notifier - A comma separated list of notifier IDs to alert when there is an error or when the hunt is complete.
+   * @param {string[]} notifier - An array of notifier IDs to alert when there is an error or when the hunt is complete.
    * @param {string} users - The comma separated list of users to be added to the hunt so they can view the results.
    * @returns {boolean} success - Whether the creation of the hunt was successful.
    * @returns {Hunt} hunt - The newly created hunt object.
@@ -1235,7 +1242,7 @@ ${Config.arkimeWebURL()}sessions?expression=huntId==${huntId}&stopTime=${hunt.qu
         return res.serverError(500, 'Unable to update hunt', 'api.hunts.errorUpdating');
       }
     } catch (err) {
-      console.log(`ERROR - ${req.method} /api/hunt/%s/users (getHunt)`, ArkimeUtil.sanitizeStr(req.params.id), util.inspect(err, false, 50));
+      console.log(`ERROR - ${req.method} /api/hunt/%s (updateHunt)`, ArkimeUtil.sanitizeStr(req.params.id), util.inspect(err, false, 50));
       return res.serverError(500, 'Unable to update hunt', 'api.hunts.errorUpdating');
     }
   }
@@ -1340,7 +1347,7 @@ ${Config.arkimeWebURL()}sessions?expression=huntId==${huntId}&stopTime=${hunt.qu
    * GET - /api/hunt/:nodeName/:huntId/remote/:sessionId
    *
    * Searches a session on a remote node.
-   * @name /:nodeName/hunt/:huntId/remote/:sessionId
+   * @name /hunt/:nodeName/:huntId/remote/:sessionId
    * @returns {boolean} matched - Whether searching the session packets resulted in a match with the search text.
    * @returns {string} error - If an error occurred, describes the error.
    */
@@ -1359,7 +1366,7 @@ ${Config.arkimeWebURL()}sessions?expression=huntId==${huntId}&stopTime=${hunt.qu
     // fetch hunt and session
     Promise.all([
       Db.get('hunts', huntId),
-      Db.getSession(sessionId)
+      Db.getSession(sessionId, { _source: false, fields: ['node'] })
     ]).then(([{ body: hunt }, session]) => {
       if (hunt.error || session.error) {
         console.log('HUNT - remoteHunt error', hunt.error || session.error);
@@ -1368,7 +1375,7 @@ ${Config.arkimeWebURL()}sessions?expression=huntId==${huntId}&stopTime=${hunt.qu
       }
 
       hunt = hunt._source;
-      session = session._source;
+      session = session.fields;
 
       const options = HuntAPIs.#buildHuntOptions(huntId, hunt);
 

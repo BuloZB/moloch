@@ -1,5 +1,5 @@
 # WISE tests
-use Test::More tests => 160;
+use Test::More tests => 167;
 use ArkimeTest;
 use Cwd;
 use URI::Escape;
@@ -186,7 +186,7 @@ eq_or_diff(from_json($wise), from_json('[{"field":"email.dst","len":10,"value":"
 '),"ALL 12345678\@aol.com");
 
 $wise = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8081/rightClicks")->content;
-eq_or_diff(from_json($wise), from_json('{"ALLTESTWISE":{"url":"http:/www.example.com","all":true,"name":"AllWiseTest"},"USERTEST":{"url": "https://example.com", "name": "usertest", "category": "url","users":{"sac-test1":1},"notUsers":{"test101":1}},"VTIP":{"url":"https://www.virustotal.com/en/ip-address/%TEXT%/information/","name":"Virus Total IP","category":"ip"},"VTHOST":{"url":"https://www.virustotal.com/en/domain/%HOST%/information/","name":"Virus Total Host","category":"host"},"VTURL":{"url":"https://www.virustotal.com/latest-scan/%URL%","name":"Virus Total URL","category":"url"}}'),"right clicks");
+eq_or_diff(from_json($wise), from_json('{"ALLTESTWISE":{"url":"http://www.example.com","all":true,"name":"AllWiseTest"},"USERTEST":{"url": "https://example.com", "name": "usertest", "category": "url","users":{"sac-test1":1},"notUsers":{"test101":1}},"VTIP":{"url":"https://www.virustotal.com/en/ip-address/%TEXT%/information/","name":"Virus Total IP","category":"ip"},"VTHOST":{"url":"https://www.virustotal.com/en/domain/%HOST%/information/","name":"Virus Total Host","category":"host"},"VTURL":{"url":"https://www.virustotal.com/latest-scan/%URL%","name":"Virus Total URL","category":"url"}}'),"right clicks");
 
 my $pwd = "*/pcap";
 
@@ -269,13 +269,48 @@ $wise = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8081/file:mac/mac/
 eq_or_diff($wise, '[{"field":"tags","len":10,"value":"wisebymac1"},
 {"field":"tags","len":7,"value":"macwise"}]',"file:mac query");
 
+# Splunk source (non-periodic, per-key oneshot search against mini-wise-source.js)
+$wise = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8081/splunktest/66.66.66.66")->content;
+$wise = [sort { $a->{value} cmp $b->{value}} @{from_json($wise)}];
+eq_or_diff($wise, from_json('[{"field":"tags","len":14,"value":"splunk-malware"},
+{"field":"tags","len":10,"value":"splunkwise"}]'), "splunk 66.66.66.66");
+
+$wise = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8081/splunktest/66.66.66.67")->content;
+$wise = [sort { $a->{value} cmp $b->{value}} @{from_json($wise)}];
+eq_or_diff($wise, from_json('[{"field":"tags","len":13,"value":"splunk-botnet"},
+{"field":"tags","len":10,"value":"splunkwise"}]'), "splunk 66.66.66.67");
+
+$wise = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8081/splunktest/1.2.3.4")->content;
+eq_or_diff($wise, '[]', "splunk miss");
+
+# Databricks source (periodic full-table query, cached at startup, against mini-wise-source.js)
+$wise = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8081/databrickstest/77.77.77.77")->content;
+$wise = [sort { $a->{value} cmp $b->{value}} @{from_json($wise)}];
+eq_or_diff($wise, from_json('[{"field":"tags","len":13,"value":"databricks-c2"},
+{"field":"tags","len":14,"value":"databrickswise"}]'), "databricks 77.77.77.77");
+
+$wise = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8081/databrickstest/77.77.77.78")->content;
+$wise = [sort { $a->{value} cmp $b->{value}} @{from_json($wise)}];
+eq_or_diff($wise, from_json('[{"field":"tags","len":16,"value":"databricks-phish"},
+{"field":"tags","len":14,"value":"databrickswise"}]'), "databricks 77.77.77.78");
+
+$wise = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8081/databrickstest/9.9.9.9")->content;
+eq_or_diff($wise, '[]', "databricks miss");
+
+$wise = "[" . $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8081/dump/databricks:test")->content . "]";
+@wise = sort { $a->{key} cmp $b->{key}} @{from_json($wise, {relaxed=>1})};
+eq_or_diff(\@wise, from_json('[
+{"key":"77.77.77.77","ops":[{"field":"tags","len":14,"value":"databrickswise"},{"field":"tags","len":13,"value":"databricks-c2"}]},
+{"key":"77.77.77.78","ops":[{"field":"tags","len":14,"value":"databrickswise"},{"field":"tags","len":16,"value":"databricks-phish"}]}
+]', {relaxed=>1}), "databricks:test dump");
+
 # Sources
 $wise = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8081/sources")->content;
-eq_or_diff($wise, '["fieldactions:test","file:domain","file:email","file:ip","file:ipcsv","file:ipjson","file:ipjsonl","file:ipjsonnested","file:ja3","file:mac","file:md5","file:sha256","file:url","reversedns","url:aws-ips","url:gcloud-ips4","url:gcloud-ips6","valueactions:test"]',"/sources");
+eq_or_diff($wise, '["databricks:test","fieldactions:test","file:domain","file:email","file:ip","file:ipcsv","file:ipjson","file:ipjsonl","file:ipjsonnested","file:ja3","file:mac","file:md5","file:sha256","file:url","reversedns","splunk:test","url:aws-ips","url:gcloud-ips4","url:gcloud-ips6","valueactions:test"]',"/sources");
 
 # Types
 $wise = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8081/types")->content;
-eq_or_diff($wise, '["domain","email","ip","ja3","mac","md5","sha256","url"]',"sources");
+eq_or_diff($wise, '["databrickstest","domain","email","ip","ja3","mac","md5","sha256","splunktest","url"]',"types");
 
 $wise = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8081/types/file:ip")->content;
 eq_or_diff($wise, '["ip"]',"types file:ip");
@@ -321,11 +356,11 @@ eq_or_diff($info->{"wise.int.cnt"}, from_json('{"friendlyName":"Int Cnt","type":
 
 # Field Actions
 $wise = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8081/fieldActions")->content;
-eq_or_diff($wise, '{"ASDFWISE":{"url":"https://www.asdf.com?expression=%EXPRESSION%&date=%DATE%&field=%FIELD%&dbField=%DBFIELD%","name":"Field Action %FIELDNAME%!","category":"ip","users":{"admin":1,"sac-test1":1},"notUsers":{"test101":1}},"ALLTESTWISE":{"url":"http:/www.example.com","name":"AllWiseTest","all":true}}');
+eq_or_diff($wise, '{"ASDFWISE":{"url":"https://www.asdf.com?expression=%EXPRESSION%&date=%DATE%&field=%FIELD%&dbField=%DBFIELD%","name":"Field Action %FIELDNAME%!","category":"ip","users":{"admin":1,"sac-test1":1},"notUsers":{"test101":1}},"ALLTESTWISE":{"url":"http://www.example.com","name":"AllWiseTest","all":true}}');
 
 # Value Actions
 $wise = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8081/valueActions")->content;
-eq_or_diff($wise, '{"VTIP":{"url":"https://www.virustotal.com/en/ip-address/%TEXT%/information/","name":"Virus Total IP","category":"ip"},"VTHOST":{"url":"https://www.virustotal.com/en/domain/%HOST%/information/","name":"Virus Total Host","category":"host"},"VTURL":{"url":"https://www.virustotal.com/latest-scan/%URL%","name":"Virus Total URL","category":"url"},"USERTEST":{"url":"https://example.com","name":"usertest","category":"url","users":{"sac-test1":1},"notUsers":{"test101":1}},"ALLTESTWISE":{"url":"http:/www.example.com","name":"AllWiseTest","all":true}}');
+eq_or_diff($wise, '{"VTIP":{"url":"https://www.virustotal.com/en/ip-address/%TEXT%/information/","name":"Virus Total IP","category":"ip"},"VTHOST":{"url":"https://www.virustotal.com/en/domain/%HOST%/information/","name":"Virus Total Host","category":"host"},"VTURL":{"url":"https://www.virustotal.com/latest-scan/%URL%","name":"Virus Total URL","category":"url"},"USERTEST":{"url":"https://example.com","name":"usertest","category":"url","users":{"sac-test1":1},"notUsers":{"test101":1}},"ALLTESTWISE":{"url":"http://www.example.com","name":"AllWiseTest","all":true}}');
 
 # __proto__
 $wise = $ArkimeTest::userAgent->get("http://$ArkimeTest::host:8081/file:mac/__proto__/00:12:1e:f2:61:3d")->content;

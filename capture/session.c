@@ -304,7 +304,7 @@ uint32_t arkime_session_hash(const void *key)
         uint32_t k1 = *p;
         k1 *= 0xcc9e2d51;
         k1 = (k1 << 15) | (k1 >> 17); // Rotate left 15 bits
-        k1 *= 0x1b873531;
+        k1 *= 0x1b873593;
 
         h1 ^= k1;
         h1 = (h1 << 13) | (h1 >> 19); // Rotate left 13 bits
@@ -496,7 +496,7 @@ LOCAL void arkime_session_hash_remove(ArkimeSessionHash_t *hash, ArkimeSession_t
 }
 /******************************************************************************/
 LOCAL void arkime_session_hash_add(ArkimeSessionHash_t *hash, uint32_t h, ArkimeSession_t *session);
-LOCAL void arkime_session_hash_resize(ArkimeSessionHash_t *UNUSED(hash))
+LOCAL void arkime_session_hash_resize(ArkimeSessionHash_t *hash)
 {
     if (config.debug)
         LOG("Resizing session hash table from %u to %u with %u items", hash->size, hash->size << 1, hash->count);
@@ -1013,7 +1013,7 @@ LOCAL void arkime_session_load_stopped()
         uint8_t  key[ARKIME_SESSIONID_LEN];
         uint32_t value;
         read += fread(key, 1, 1, fp);
-        if (key[0] < 1 || key[0] > ARKIME_SESSIONID_LEN) {
+        if (read != 1 || key[0] < 1 || key[0] > ARKIME_SESSIONID_LEN) {
             LOG("WARNING - `%s` corrupt", stoppedFilename);
             break;
         }
@@ -1206,7 +1206,7 @@ void arkime_session_process_commands(int thread)
                 break;
 
             if (DLL_COUNT(q_, &sessionThreadData[thread].sessionsQ[mProtocol]) > (int)config.maxStreams[session->ses]) {
-                LOG_RATE(60, "ERROR - closing session early, increase maxStreams see https://arkime.com/settings#maxStreams");
+                LOG_RATE(60, "ERROR - closing session early, increase maxStreams; see https://arkime.com/settings#maxStreams");
                 arkime_session_save(session);
             } else if (((uint64_t)session->lastPacket.tv_sec + mProtocols[mProtocol].sessionTimeout < (uint64_t)arkimeThreadData[thread].lastPacketSecs)) {
                 arkime_session_save(session);
@@ -1330,10 +1330,13 @@ void arkime_session_init()
     arkime_add_can_quit(arkime_session_close_outstanding, "session close outstanding");
     arkime_add_can_quit(arkime_session_need_save_outstanding, "session save outstanding");
 
-    g_timeout_add_seconds(10, arkime_session_save_stopped, 0);
-
+    // The stopped-sessions state file persists "stop saving" decisions across
+    // restarts. Only write for live captures.
     snprintf(stoppedFilename, sizeof(stoppedFilename), "%s.stoppedsessions", config.nodeName);
-    arkime_session_load_stopped();
+    if (!config.dryRun && !config.pcapReadOffline) {
+        g_timeout_add_seconds(10, arkime_session_save_stopped, 0);
+        arkime_session_load_stopped();
+    }
     arkime_session_load_collapse();
 
     arkime_session_pre_save_func = arkime_parsers_get_named_func("arkime_session_pre_save");

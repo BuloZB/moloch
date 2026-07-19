@@ -253,7 +253,8 @@ LOCAL YamlNode_t *arkime_rules_parser_get(YamlNode_t *node, const char *path)
 
         int i;
         for (i = 0; i < (int)node->values->len; i++) {
-            if (strncmp(path, ((YamlNode_t *)g_ptr_array_index(node->values, i))->key, len) == 0)
+            const char *key = ((YamlNode_t *)g_ptr_array_index(node->values, i))->key;
+            if (strncmp(path, key, len) == 0 && key[len] == 0)
                 break;
         }
         if (i == (int)node->values->len)
@@ -619,11 +620,11 @@ LOCAL void arkime_rules_parser_load_rule(char *filename, YamlNode_t *parent)
         rule->bpf = g_strdup(bpf);
 
     if (fields) {
-        int mtype = 0;
         rule->fields = malloc((int)fields->len * 2);
         rule->fieldsNOT = malloc((int)fields->len * 2);
         for (int i = 0; i < (int)fields->len; i++) {
             YamlNode_t *node = g_ptr_array_index(fields, i);
+            int mtype = 0;
 
             if (node->key[0] == '!') {
                 arkime_rules_parser_load_add_field_not(filename, rule, node);
@@ -778,8 +779,8 @@ LOCAL void arkime_rules_load_complete()
             GMatchInfo *match_info = 0;
             g_regex_match(regex, bpfs[i], 0, &match_info);
             if (g_match_info_matches(match_info)) {
-                g_match_info_fetch_pos (match_info, 1, &start_pos, NULL);
-                rule->bpf = g_strndup(bpfs[i], start_pos - 1);
+                g_match_info_fetch_pos (match_info, 0, &start_pos, NULL);
+                rule->bpf = g_strndup(bpfs[i], start_pos);
                 char *fetched = g_match_info_fetch(match_info, 1);
                 arkime_field_ops_add(&rule->ops, pos, fetched, -1);
                 g_free(fetched);
@@ -804,8 +805,8 @@ LOCAL void arkime_rules_load_complete()
             GMatchInfo *match_info = 0;
             g_regex_match(regex, bpfs[i], 0, &match_info);
             if (g_match_info_matches(match_info)) {
-                g_match_info_fetch_pos (match_info, 1, &start_pos, NULL);
-                rule->bpf = g_strndup(bpfs[i], start_pos - 1);
+                g_match_info_fetch_pos (match_info, 0, &start_pos, NULL);
+                rule->bpf = g_strndup(bpfs[i], start_pos);
                 char *fetched = g_match_info_fetch(match_info, 1);
                 arkime_field_ops_add(&rule->ops, pos, fetched, -1);
                 g_free(fetched);
@@ -908,7 +909,7 @@ LOCAL void arkime_rules_load(char **names)
         yaml_parser_initialize(&parser);
         FILE *input = fopen(names[i], "rb");
         if (!input)
-            CONFIGEXIT("can not open rules file %s", names[i]);
+            CONFIGEXIT("cannot open rules file %s", names[i]);
 
         yaml_parser_set_input_file(&parser, input);
         YamlNode_t *parent = arkime_rules_parser_parse_yaml(names[i], NULL, &parser, FALSE);
@@ -1287,8 +1288,7 @@ LOCAL void arkime_rules_check_rule_fields(ArkimeSession_t *const session, Arkime
             }
 
             if (!session->fields[cp]) {
-                good = g_hash_table_contains(rule->hash[p], (gpointer)(long)0);
-                RULE_LOG_INT(0);
+                good = arkime_rules_check_int_match(rule, p, 0, logStr);
                 continue;
             }
 
@@ -1297,39 +1297,32 @@ LOCAL void arkime_rules_check_rule_fields(ArkimeSession_t *const session, Arkime
             case ARKIME_FIELD_TYPE_INT:
             case ARKIME_FIELD_TYPE_FLOAT:
             case ARKIME_FIELD_TYPE_STR:
-                good = g_hash_table_contains(rule->hash[p], (gpointer)(long)1);
-                RULE_LOG_INT(1);
+                good = arkime_rules_check_int_match(rule, p, 1, logStr);
                 break;
             case ARKIME_FIELD_TYPE_INT_ARRAY:
             case ARKIME_FIELD_TYPE_INT_ARRAY_UNIQUE:
-                good = g_hash_table_contains(rule->hash[p], (gpointer)(long)session->fields[cp]->iarray->len);
-                RULE_LOG_INT(session->fields[cp]->iarray->len);
+                good = arkime_rules_check_int_match(rule, p, session->fields[cp]->iarray->len, logStr);
                 break;
             case ARKIME_FIELD_TYPE_FLOAT_ARRAY:
-                good = g_hash_table_contains(rule->hash[p], (gpointer)(long)session->fields[cp]->farray->len);
-                RULE_LOG_INT(session->fields[cp]->farray->len);
+                good = arkime_rules_check_int_match(rule, p, session->fields[cp]->farray->len, logStr);
                 break;
             case ARKIME_FIELD_TYPE_INT_HASH:
                 ihash = session->fields[cp]->ihash;
-                good = g_hash_table_contains(rule->hash[p], (gpointer)(long)HASH_COUNT(s_, *ihash));
-                RULE_LOG_INT(HASH_COUNT(s_, *ihash));
+                good = arkime_rules_check_int_match(rule, p, HASH_COUNT(i_, *ihash), logStr);
                 break;
             case ARKIME_FIELD_TYPE_IP_GHASH:
             case ARKIME_FIELD_TYPE_FLOAT_GHASH:
             case ARKIME_FIELD_TYPE_STR_GHASH:
             case ARKIME_FIELD_TYPE_INT_GHASH:
                 ghash = session->fields[cp]->ghash;
-                good = g_hash_table_contains(rule->hash[p], (gpointer)(long)g_hash_table_size(ghash));
-                RULE_LOG_INT(g_hash_table_size(ghash));
+                good = arkime_rules_check_int_match(rule, p, g_hash_table_size(ghash), logStr);
                 break;
             case ARKIME_FIELD_TYPE_STR_ARRAY:
-                good = g_hash_table_contains(rule->hash[p], (gpointer)(long)session->fields[cp]->sarray->len);
-                RULE_LOG_INT(session->fields[cp]->sarray->len);
+                good = arkime_rules_check_int_match(rule, p, session->fields[cp]->sarray->len, logStr);
                 break;
             case ARKIME_FIELD_TYPE_STR_HASH:
                 shash = session->fields[cp]->shash;
-                good = g_hash_table_contains(rule->hash[p], (gpointer)(long)HASH_COUNT(s_, *shash));
-                RULE_LOG_INT(HASH_COUNT(s_, *shash));
+                good = arkime_rules_check_int_match(rule, p, HASH_COUNT(s_, *shash), logStr);
                 break;
             case ARKIME_FIELD_TYPE_OBJECT:
                 // Unsupported
@@ -1357,7 +1350,6 @@ LOCAL void arkime_rules_check_rule_fields(ArkimeSession_t *const session, Arkime
                 break;
             case ARKIME_FIELD_TYPE_INT:
                 good = arkime_rules_check_int_match(rule, p, (long)value, logStr);
-                RULE_LOG_INT((long)value);
                 break;
             case ARKIME_FIELD_TYPE_STR:
                 good = arkime_rules_check_str_match(rule, p, value, logStr);
@@ -1419,7 +1411,6 @@ LOCAL void arkime_rules_check_rule_fields(ArkimeSession_t *const session, Arkime
 
         case ARKIME_FIELD_TYPE_INT:
             good = arkime_rules_check_int_match(rule, p, session->fields[p]->i, logStr);
-            RULE_LOG_INT(session->fields[p]->i);
             break;
         case ARKIME_FIELD_TYPE_INT_ARRAY:
         case ARKIME_FIELD_TYPE_INT_ARRAY_UNIQUE:
@@ -1454,13 +1445,14 @@ LOCAL void arkime_rules_check_rule_fields(ArkimeSession_t *const session, Arkime
             break;
 
         case ARKIME_FIELD_TYPE_FLOAT:
-            good = g_hash_table_contains(rule->hash[p], (gpointer)(long)session->fields[p]->f);
+            // ->i aliases ->f in the union, giving the float bit pattern used as hash key
+            good = g_hash_table_contains(rule->hash[p], (gpointer)(long)(uint32_t)session->fields[p]->i);
             RULE_LOG_FLOAT(session->fields[p]->f);
             break;
         case ARKIME_FIELD_TYPE_FLOAT_ARRAY:
             good = 0;
             for (int i = 0; i < (int)session->fields[p]->farray->len; i++) {
-                if (g_hash_table_contains(rule->hash[p], (gpointer)(long)g_array_index(session->fields[p]->farray, float, i))) {
+                if (g_hash_table_contains(rule->hash[p], (gpointer)(long)g_array_index(session->fields[p]->farray, uint32_t, i))) {
                     good = 1;
                     RULE_LOG_FLOAT(g_array_index(session->fields[p]->farray, float, i));
                     break;

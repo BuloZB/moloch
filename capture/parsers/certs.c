@@ -33,7 +33,7 @@ typedef struct arkime_certsinfo {
     ArkimeCertInfo_t         subject;
     ArkimeStringHead_t       alt;
     uint8_t                 *serialNumber;
-    short                    serialNumberLen;
+    uint32_t                 serialNumberLen;
     uint8_t                  hash[60];
     char                     isCA;
     const char              *publicAlgorithm;
@@ -84,7 +84,7 @@ LOCAL void certinfo_save(BSB *jbsb, ArkimeFieldObject_t *object, ArkimeSession_t
     SAVE_STRING_HEAD(ci->subject.orgUnit, "subjectOU");
 
     if (ci->serialNumber) {
-        int k;
+        uint32_t k;
         BSB_EXPORT_cstr(*jbsb, "\"serial\":\"");
         for (k = 0; k < ci->serialNumberLen; k++) {
             BSB_EXPORT_sprintf(*jbsb, "%02x", ci->serialNumber[k]);
@@ -290,8 +290,10 @@ LOCAL void certinfo_key_usage (ArkimeCertsInfo_t *certs, BSB *bsb)
     while (BSB_REMAINING(*bsb) >= 2) {
         const uint8_t *value = arkime_parsers_asn_get_tlv(bsb, &apc, &atag, &alen);
 
-        if (value && atag == 4 && alen == 4)
-            certs->isCA = (value[3] & 0x02);
+        // OCTET STRING wrapping a BIT STRING {0x03, len, unusedBits, bits...};
+        // keyCertSign is 0x04 in the first bits byte
+        if (value && atag == 4 && alen >= 4 && value[0] == 3)
+            certs->isCA = (value[3] & 0x04);
     }
 }
 /******************************************************************************/
@@ -312,9 +314,6 @@ LOCAL void certinfo_alt_names(ArkimeSession_t *session, ArkimeCertsInfo_t *certs
             BSB tbsb;
             BSB_INIT(tbsb, value, alen);
             certinfo_alt_names(session, certs, &tbsb, lastOid, depth + 1);
-            if (certs->alt.s_count > 0) {
-                return;
-            }
         } else if (atag == 6) {
             arkime_parsers_asn_decode_oid(lastOid, 100, value, alen);
             if (strcmp(lastOid, "2.5.29.15") == 0) {
@@ -501,9 +500,10 @@ LOCAL int certinfo_process_single_cert(ArkimeSession_t *session, const uint8_t *
             goto bad_cert;
         }
     }
-    certs->serialNumberLen = alen;
-    certs->serialNumber = ARKIME_SIZE_ALLOC("serialNumber", alen);
-    memcpy(certs->serialNumber, value, alen);
+    // RFC 5280 says serialNumber is max 20 octets, but some CAs violate that; cap defensively
+    certs->serialNumberLen = MIN(alen, 256);
+    certs->serialNumber = ARKIME_SIZE_ALLOC("serialNumber", certs->serialNumberLen);
+    memcpy(certs->serialNumber, value, certs->serialNumberLen);
 
     /* signature */
     if (!arkime_parsers_asn_get_tlv(&bsb, &apc, &atag, &alen)) {
@@ -656,7 +656,10 @@ GPtrArray *arkime_field_certsinfo_get_extra(const ArkimeSession_t *session, cons
 
     GPtrArray *array = NULL;
     HASH_FORALL2(o_, *ohash, object) {
-        char *value = g_hash_table_lookup(((ArkimeCertsInfo_t *)object->object)->extra, key);
+        GHashTable *extra = ((ArkimeCertsInfo_t *)object->object)->extra;
+        if (!extra)
+            continue;
+        char *value = g_hash_table_lookup(extra, key);
         if (value) {
             if (!array) {
                 array = g_ptr_array_new();

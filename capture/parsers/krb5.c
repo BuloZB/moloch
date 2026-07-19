@@ -105,7 +105,7 @@ LOCAL const char *krb5Errors[] = {
 };
 
 /******************************************************************************/
-/* wireshark: k5.asn which based on http://www.h5l.org/dist/src/heimdal-1.2.tar.gz
+/* wireshark: k5.asn which is based on http://www.h5l.org/dist/src/heimdal-1.2.tar.gz
 --PrincipalName ::= SEQUENCE {
 --      name-type[0]            NAME-TYPE,
 --      name-string[1]          SEQUENCE OF GeneralString
@@ -139,7 +139,7 @@ LOCAL void krb5_parse_principal_name(ArkimeSession_t *session, int field, const 
     }
 }
 /******************************************************************************/
-/* wireshark: k5.asn which based on http://www.h5l.org/dist/src/heimdal-1.2.tar.gz
+/* wireshark: k5.asn which is based on http://www.h5l.org/dist/src/heimdal-1.2.tar.gz
 --KDC-REQ-BODY ::= SEQUENCE {
 --      kdc-options[0]          KDCOptions,
 --      cname[1]                PrincipalName OPTIONAL, - - Used only in AS-REQ
@@ -197,7 +197,7 @@ LOCAL void krb5_parse_req_body(ArkimeSession_t *session, const uint8_t *data, in
 }
 
 /******************************************************************************/
-/* wireshark: k5.asn which based on http://www.h5l.org/dist/src/heimdal-1.2.tar.gz
+/* wireshark: k5.asn which is based on http://www.h5l.org/dist/src/heimdal-1.2.tar.gz
 --KDC-REQ ::= SEQUENCE {
 --      pvno[1]                 Krb5int32,
 --      msg-type[2]             MESSAGE-TYPE,
@@ -231,7 +231,7 @@ LOCAL void krb5_parse_req(ArkimeSession_t *session, const uint8_t *data, int len
     }
 }
 /******************************************************************************/
-/* wireshark: k5.asn which based on http://www.h5l.org/dist/src/heimdal-1.2.tar.gz
+/* wireshark: k5.asn which is based on http://www.h5l.org/dist/src/heimdal-1.2.tar.gz
 --KDC-REP ::= SEQUENCE {
 --      pvno[0]                 Krb5int32,
 --      msg-type[1]             MESSAGE-TYPE,
@@ -247,7 +247,7 @@ LOCAL void krb5_parse_rep(ArkimeSession_t *session, const uint8_t *UNUSED(data),
     arkime_session_add_protocol(session, "krb5");
 }
 /******************************************************************************/
-/* wireshark: k5.asn which based on http://www.h5l.org/dist/src/heimdal-1.2.tar.gz
+/* wireshark: k5.asn which is based on http://www.h5l.org/dist/src/heimdal-1.2.tar.gz
 --KRB-ERROR ::= [APPLICATION 30] SEQUENCE {
 --      pvno[0]                 Krb5int32,
 --      msg-type[1]             MESSAGE-TYPE,
@@ -384,12 +384,18 @@ LOCAL int krb5_tcp_parser(ArkimeSession_t *session, void *uw, const uint8_t *dat
     if (krb5->len[which] < 4)
         return 0;
 
-    int len = (krb5->buf[which][2] << 8) | krb5->buf[which][3];
-    if (len + 4 > (int)krb5->bufMax) {
+    // RFC 4120 §7.2.2: 4-byte big-endian record length (high bit reserved)
+    if (krb5->buf[which][0] & 0x80) {
         arkime_session_add_tag(session, "krb5:record-too-long");
         return ARKIME_PARSER_UNREGISTER;
     }
-    if (krb5->len[which] < len + 4)
+    uint32_t len = ((uint32_t)krb5->buf[which][0] << 24) | ((uint32_t)krb5->buf[which][1] << 16) |
+                   ((uint32_t)krb5->buf[which][2] << 8) | krb5->buf[which][3];
+    if (len + 4 > krb5->bufMax) {
+        arkime_session_add_tag(session, "krb5:record-too-long");
+        return ARKIME_PARSER_UNREGISTER;
+    }
+    if (krb5->len[which] < (int)(len + 4))
         return 0;
     krb5_parse(session, krb5->buf[which] + 4, len);
     arkime_parser_buf_del(krb5, which, len + 4);

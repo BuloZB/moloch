@@ -19,7 +19,9 @@ extern uint32_t         pluginsCbs;
 
 LOCAL  ArkimeStringHashStd_t emailHeaders;
 
-LOCAL  int receivedField;
+// Not a real field, just a sentinel for the emailHeaders dispatch; -1 can
+// never collide with a defined field id
+LOCAL  int receivedField = -1;
 LOCAL  int idField;
 LOCAL  int ipField;
 LOCAL  int hostField;
@@ -95,6 +97,31 @@ LOCAL char *smtp_remove_matching(char *str, char start, char stop)
     char *startstr = str;
 
     while (*str && *str != stop)
+        str++;
+    *str = 0;
+
+    return startstr;
+}
+/******************************************************************************/
+// Parse a MIME parameter value (RFC 2045): either a quoted-string ("...") or a
+// bare token terminated by ';', whitespace, or end-of-string. NUL-terminates the
+// value in place and returns a pointer to its start.
+LOCAL char *smtp_parse_param_value(char *str)
+{
+    while (isspace(*str))
+        str++;
+
+    if (*str == '"') {
+        str++;
+        char *startstr = str;
+        while (*str && *str != '"')
+            str++;
+        *str = 0;
+        return startstr;
+    }
+
+    char *startstr = str;
+    while (*str && *str != ';' && !isspace(*str))
         str++;
     *str = 0;
 
@@ -317,7 +344,7 @@ LOCAL void smtp_email_add_encoded(ArkimeSession_t *session, int pos, char *strin
                 // No need to convert, will validate at the end
                 BSB_EXPORT_ptr_some(bsb, question + 3, olen);
             } else {
-                char *out = g_convert((char *)question + 3, strlen(question + 3), "utf-8", fmt, &bread, &bwritten, &error);
+                char *out = g_convert((char *)question + 3, olen, "utf-8", fmt, &bread, &bwritten, &error);
                 if (error) {
                     LOG("WARNING - failed converting %s to utf-8 %s ", str + 2, error->message);
                     arkime_field_string_add(pos, session, string, len, TRUE);
@@ -336,8 +363,8 @@ LOCAL void smtp_email_add_encoded(ArkimeSession_t *session, int pos, char *strin
     }
 
     if (BSB_IS_ERROR(bsb)) {
-        // Error is from being too long, just output what we have
-        arkime_field_string_add(pos, session, output, sizeof(output), TRUE);
+        // Shouldn't happen since the appends truncate, output what we have
+        arkime_field_string_add(pos, session, output, BSB_LENGTH(bsb), TRUE);
         return;
     }
 
@@ -579,6 +606,7 @@ LOCAL int smtp_parser(ArkimeSession_t *session, void *uw, const uint8_t *data, i
             if (out_len > 0) {
                 arkime_field_string_add_lower(userField, session, line->str, out_len);
             }
+            g_string_truncate(line, 0);
             *state = EMAIL_CMD;
             break;
         }
@@ -597,6 +625,7 @@ LOCAL int smtp_parser(ArkimeSession_t *session, void *uw, const uint8_t *data, i
                     arkime_field_string_add_lower(userField, session, (char *)user, nul2 - user);
                 }
             }
+            g_string_truncate(line, 0);
             *state = EMAIL_CMD;
             break;
         }
@@ -678,7 +707,7 @@ LOCAL int smtp_parser(ArkimeSession_t *session, void *uw, const uint8_t *data, i
                     char *boundary = (char *)arkime_memcasestr(s, line->len - (s - line->str), "boundary=", 9);
                     if (boundary && DLL_COUNT(s_, &email->boundaries) < SMTP_MAX_BOUNDARIES) {
                         ArkimeString_t *string = ARKIME_TYPE_ALLOC0(ArkimeString_t);
-                        string->str = g_strdup(smtp_remove_matching(boundary + 9, '"', '"'));
+                        string->str = g_strdup(smtp_parse_param_value(boundary + 9));
                         string->len = strlen(string->str);
                         DLL_PUSH_TAIL(s_, &email->boundaries, string);
                     }
@@ -739,7 +768,7 @@ LOCAL int smtp_parser(ArkimeSession_t *session, void *uw, const uint8_t *data, i
             } else {
                 gboolean        found = FALSE;
 
-                if (line->str[0] == '-') {
+                if (line->str[0] == '-' && line->str[1] == '-') {
                     const ArkimeString_t *string;
                     DLL_FOREACH(s_, &email->boundaries, string) {
                         if ((int)line->len >= (int)(string->len + 2) && memcmp(line->str + 2, string->str, string->len) == 0) {
@@ -875,7 +904,7 @@ LOCAL int smtp_parser(ArkimeSession_t *session, void *uw, const uint8_t *data, i
                 char *boundary = (char *)arkime_memcasestr(s, line->len - (s - line->str), "boundary=", 9);
                 if (boundary && DLL_COUNT(s_, &email->boundaries) < SMTP_MAX_BOUNDARIES) {
                     ArkimeString_t *string = ARKIME_TYPE_ALLOC0(ArkimeString_t);
-                    string->str = g_strdup(smtp_remove_matching(boundary + 9, '"', '"'));
+                    string->str = g_strdup(smtp_parse_param_value(boundary + 9));
                     string->len = strlen(string->str);
                     DLL_PUSH_TAIL(s_, &email->boundaries, string);
                 }
@@ -1044,7 +1073,7 @@ void arkime_parser_init()
 
     mvField = arkime_field_define("email", "termfield",
                                   "email.mime-version", "Mime-Version", "email.mimeVersion",
-                                  "Email Mime-Header header",
+                                  "Email Mime-Version header",
                                   ARKIME_FIELD_TYPE_STR_HASH,  ARKIME_FIELD_FLAG_CNT,
                                   (char *)NULL);
 

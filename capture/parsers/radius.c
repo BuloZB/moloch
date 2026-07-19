@@ -42,6 +42,10 @@ LOCAL int radius_udp_parser(ArkimeSession_t *session, void *UNUSED(uw), const ui
 {
     BSB bsb;
 
+    // Attributes end at the RADIUS Length field; anything beyond is padding
+    if (len >= 4)
+        len = MIN(len, (data[2] << 8) | data[3]);
+
     BSB_INIT(bsb, data, len);
 
     if (len >= 1) {
@@ -86,10 +90,10 @@ LOCAL int radius_udp_parser(ArkimeSession_t *session, void *UNUSED(uw), const ui
             }
             break;
         case 8:
-            if (length != 4)
-                return 0;
-            memcpy(&in.s_addr, value, 4);
-            arkime_field_ip4_add(framedIpField, session, in.s_addr);
+            if (length == 4) {
+                memcpy(&in.s_addr, value, 4);
+                arkime_field_ip4_add(framedIpField, session, in.s_addr);
+            }
             break;
         case 31:
             if (length == 12) {
@@ -101,8 +105,8 @@ LOCAL int radius_udp_parser(ArkimeSession_t *session, void *UNUSED(uw), const ui
                          value[8], value[9],
                          value[10], value[11]);
                 for (i = 0; i < 17; i++) {
-                    if (isupper(str[i]))
-                        str[i] = tolower(str[i]);
+                    if (isupper((unsigned char)str[i]))
+                        str[i] = tolower((unsigned char)str[i]);
                 }
                 arkime_field_string_add(macField, session, str, 17, TRUE);
             }
@@ -119,7 +123,9 @@ LOCAL int radius_udp_parser(ArkimeSession_t *session, void *UNUSED(uw), const ui
 /******************************************************************************/
 LOCAL void radius_udp_classify(ArkimeSession_t *session, const uint8_t *data, int len, int UNUSED(which), void *UNUSED(uw))
 {
-    if (len < 20 || len != ((data[2] << 8) | data[3])) {
+    // RFC 2865 3: octets beyond the Length field are padding; only require
+    // that the datagram holds at least Length bytes
+    if (len < 20 || len < ((data[2] << 8) | data[3])) {
         return;
     }
 

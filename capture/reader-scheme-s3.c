@@ -46,7 +46,7 @@ typedef struct s3_request {
     ArkimeSchemeAction_t  *actions;
     const char            *url;
     char                  *continuation; // Continuation token, http thread -> scheme thread
-    uint8_t                isDir : 1;    // Doint a prefix match
+    uint8_t                isDir : 1;    // Doing a prefix match
     uint8_t                isS3 : 1;     // Use S3 URL
     uint8_t                tryAgain : 1; // Try again because wrong region
     uint8_t                first : 1;    // The first attempt at url
@@ -69,7 +69,7 @@ LOCAL void s3_enqueue(S3ItemHead *head, const char *url)
     ARKIME_LOCK(head->lock);
     S3Item *item = ARKIME_TYPE_ALLOC0(S3Item);
     item->url = g_strdup(url);
-    DLL_PUSH_TAIL(item_, s3Items, item);
+    DLL_PUSH_TAIL(item_, head, item);
 
     ARKIME_COND_SIGNAL(head->lock);
     ARKIME_UNLOCK(head->lock);
@@ -158,7 +158,7 @@ LOCAL void scheme_s3_done(int code, uint8_t *data, int data_len, gpointer uw)
 
     if (next) {
         const char *endNext = arkime_memstr((const char *)data, data_len, "</NextContinuationToken>", 24);
-        if (next < endNext) {
+        if (endNext && next < endNext) {
             next += 23;
             req->continuation = scheme_s3_escape(next, endNext - next);
         }
@@ -225,20 +225,18 @@ LOCAL void scheme_s3_request(void *server, const ArkimeCredentials_t *creds, con
         LOG("objectkey: %s", objectkey);
 
     char *headers[8];
-    headers[0] = "Expect:";
-    if (pathStyle) {
-        headers[1] = NULL;
-    } else {
-        headers[1] = "Content-Type:";
+    int   hi = 0;
+    headers[hi++] = "Expect:";
+    if (!pathStyle) {
+        headers[hi++] = "Content-Type:";
     }
-    headers[2] = NULL;
-    headers[3] = NULL;
 
     char tokenHeader[1000];
     if (creds->token) {
         snprintf(tokenHeader, sizeof(tokenHeader), "X-Amz-Security-Token: %s", creds->token);
-        headers[2] = tokenHeader;
+        headers[hi++] = tokenHeader;
     }
+    headers[hi] = NULL;
 
     req->first = TRUE;
     req->tryAgain = FALSE;
@@ -326,7 +324,7 @@ LOCAL int scheme_s3_load_dir(const char *dir, ArkimeSchemeFlags flags, ArkimeSch
         ARKIME_UNLOCK(waitingdir);
     } while (req.tryAgain);
 
-    while (!s3Items->done || DLL_COUNT(item_, s3Items) > 0) {
+    while (!s3Items->done || DLL_COUNT(item_, s3Items) > 0 || req.continuation) {
         if (req.continuation) {
             char *uri2;
 
@@ -339,6 +337,11 @@ LOCAL int scheme_s3_load_dir(const char *dir, ArkimeSchemeFlags flags, ArkimeSch
             g_free(req.continuation);
             req.continuation = NULL;
 
+            // Another page is coming, clear done before it can be set again
+            ARKIME_LOCK(s3Items->lock);
+            s3Items->done = 0;
+            ARKIME_UNLOCK(s3Items->lock);
+
             scheme_s3_request(server, creds, uri2 + 5 + strlen(uris[2]), uris[2], &req, s3PathAccessStyle, NULL);
             g_free(uri2);
             ARKIME_LOCK(waitingdir);
@@ -349,6 +352,8 @@ LOCAL int scheme_s3_load_dir(const char *dir, ArkimeSchemeFlags flags, ArkimeSch
         }
         if (DLL_COUNT(item_, s3Items) == 0) {
             ARKIME_UNLOCK(s3Items->lock);
+            if (req.continuation) // Empty page, but more pages to fetch
+                continue;
             break;
         }
         S3Item *item;
@@ -450,6 +455,8 @@ LOCAL int scheme_s3_load_full_dir(const char *dir, ArkimeSchemeFlags flags, Arki
         .first = TRUE
     };
 
+    s3Items->done = 0;
+
     scheme_s3_request(server, creds, uri + strlen(shpb), paths[1], &req, TRUE, NULL);
 
     curl_free(scheme);
@@ -458,7 +465,7 @@ LOCAL int scheme_s3_load_full_dir(const char *dir, ArkimeSchemeFlags flags, Arki
     curl_free(path);
     curl_url_cleanup(h);
 
-    while (!s3Items->done || DLL_COUNT(item_, s3Items) > 0) {
+    while (!s3Items->done || DLL_COUNT(item_, s3Items) > 0 || req.continuation) {
         if (req.continuation) {
             char *uri2;
 
@@ -471,6 +478,11 @@ LOCAL int scheme_s3_load_full_dir(const char *dir, ArkimeSchemeFlags flags, Arki
             g_free(req.continuation);
             req.continuation = NULL;
 
+            // Another page is coming, clear done before it can be set again
+            ARKIME_LOCK(s3Items->lock);
+            s3Items->done = 0;
+            ARKIME_UNLOCK(s3Items->lock);
+
             scheme_s3_request(server, creds, uri2 + strlen(shpb), paths[1], &req, TRUE, NULL);
             g_free(uri2);
             ARKIME_LOCK(waitingdir);
@@ -481,6 +493,8 @@ LOCAL int scheme_s3_load_full_dir(const char *dir, ArkimeSchemeFlags flags, Arki
         }
         if (DLL_COUNT(item_, s3Items) == 0) {
             ARKIME_UNLOCK(s3Items->lock);
+            if (req.continuation) // Empty page, but more pages to fetch
+                continue;
             break;
         }
         S3Item *item;

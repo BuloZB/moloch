@@ -48,7 +48,7 @@ LOCAL int reader_snf_stats(ArkimeReaderStats_t *stats)
             if (err)
                 continue;
             //
-            // Miricom reports drops at the NIC level
+            // Myricom reports drops at the NIC level
             // not by ring, so we need to distribute
             // the drops across all rings so we don't overstate.
             // Unfortunately, in multi-process mode you can't tell
@@ -80,10 +80,13 @@ LOCAL void *reader_snf_thread(gpointer posv)
     ArkimePacketBatch_t batch;
     arkime_packet_batch_init(&batch);
     while (!config.quitting) {
-        int err = snf_ring_recv(ring, -1, &req);
+        int err = snf_ring_recv(ring, 1000, &req);
         if (err) {
-            if (err == EBUSY || err == EAGAIN || err == EINTR)
+            if (err == EBUSY || err == EAGAIN || err == EINTR) {
+                // Idle, make sure any batched packets are processed
+                arkime_packet_batch_flush(&batch);
                 continue;
+            }
             LOG("SNF quitting %d", err);
             arkime_quit();
             break;
@@ -187,7 +190,7 @@ LOCAL void reader_snf_init(const char *UNUSED(name))
         for (r = ringStartOffset; r < (ringStartOffset + snfNumRings); r++) {
             err = snf_ring_open(handles[i], &rings[i][r]);
             if (err != 0) {
-                CONFIGEXIT("Mryicom: Couldn't open ring %d for interface '%s' %d", r, config.interface[i], err);
+                CONFIGEXIT("Myricom: Couldn't open ring %d for interface '%s' %d", r, config.interface[i], err);
             }
         }
 

@@ -4,6 +4,22 @@
 import moment from 'moment-timezone';
 
 /**
+ * Escapes HTML special characters.
+ *
+ * @param {string} str The string to escape
+ * @returns {string}   The HTML-escaped string
+ */
+export const escapeHtml = function (str) {
+  if (str === undefined || str === null) { return str; }
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+};
+
+/**
  * Rounds a number using Math.round
  *
  * @example
@@ -147,7 +163,7 @@ export const parseSeconds = function (str) {
   }
 
   let m, n;
-  if ((m = str.match(/^([+-])(\d*)([a-z]*)([@]*)([a-z0-9]*)/))) {
+  if ((m = str.match(/^([+-])(\d*)([a-zA-Z]*)([@]*)([a-zA-Z0-9]*)/))) {
     const d = moment();
     const format = str2format(m[3]);
     const snap = str2format(m[5]);

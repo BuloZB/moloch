@@ -112,7 +112,7 @@ void http_common_parse_cookie(ArkimeSession_t *session, char *cookie, int len)
     }
 }
 /******************************************************************************/
-void http_common_add_header_value(ArkimeSession_t *session, int pos, const char *s, int l)
+LOCAL void http_common_add_header_value(ArkimeSession_t *session, int pos, const char *s, int l)
 {
     while (l > 0 && isspace(*s)) {
         s++;
@@ -523,10 +523,10 @@ LOCAL int arkime_hp_cb_on_header_value (http_parser *parser, const char *at, siz
         http->pos[http->which] = (long)(hstring ? hstring->uw : 0);
 
         if (http->pos[http->which] == 0) { // Header was not defined
-            if ((http->which == 0) && config.parseHTTPHeaderRequestAll) { // Header in request
+            if ((http->which == http->urlWhich) && config.parseHTTPHeaderRequestAll) { // Header in request
                 arkime_field_string_add(headerReqField, session, lower, -1, TRUE);
                 http->pos[http->which] = (long) headerReqValue;
-            } else if ((http->which == 1) && config.parseHTTPHeaderResponseAll) { // Header in response
+            } else if ((http->which != http->urlWhich) && config.parseHTTPHeaderResponseAll) { // Header in response
                 arkime_field_string_add(headerResField, session, lower, -1, TRUE);
                 http->pos[http->which] = (long) headerResValue;
             }
@@ -549,7 +549,7 @@ LOCAL int arkime_hp_cb_on_header_value (http_parser *parser, const char *at, siz
     arkime_plugins_cb_hp_ohv(session, parser, at, length);
 
     // Request side
-    if (parser->method) {
+    if (http->which == http->urlWhich) {
         if (strcasecmp("host", http->header[http->which]) == 0) {
             if (!http->hostString)
                 http->hostString = g_string_new_len(at, length);
@@ -600,6 +600,7 @@ LOCAL int arkime_hp_cb_on_headers_complete (http_parser *parser)
     HTTPInfo_t            *http = parser->data;
     ArkimeSession_t       *session = http->session;
     char                   version[20];
+    int                    skipBody = 0;
 
 #ifdef HTTPDEBUG
     LOG("HTTPDEBUG: which: %d code: %d method: %d upgrade: %d", http->which, parser->status_code, parser->method, parser->upgrade);
@@ -608,6 +609,13 @@ LOCAL int arkime_hp_cb_on_headers_complete (http_parser *parser)
     if (parser->method == HTTP_CONNECT) {
         http->reclassify |= (1 << http->which);
         http->isConnect |= (1 << http->which);
+    } else if (http->isConnect && parser->status_code >= 200 && parser->status_code < 300) {
+        // Successful response to a CONNECT: this direction becomes tunnel bytes
+        // after the headers, so mark it for reclassify and skip the fake
+        // EOF-terminated body so tunnel bytes aren't hashed as http body
+        http->reclassify |= (1 << http->which);
+        http->isConnect |= (1 << http->which);
+        skipBody = 1;
     }
 
     int len = arkime_snprintf_len(version, sizeof(version), "%d.%d", parser->http_major, parser->http_minor);
@@ -750,10 +758,12 @@ LOCAL int arkime_hp_cb_on_headers_complete (http_parser *parser)
     if (pluginsCbs & ARKIME_PLUGIN_HP_OHC)
         arkime_plugins_cb_hp_ohc(session, parser);
 
-    return 0;
+    return skipBody;
 }
 
 /*############################## SHARED ##############################*/
+/******************************************************************************/
+LOCAL void http_save(ArkimeSession_t *session, void *uw, int final);
 /******************************************************************************/
 LOCAL int http_parse(ArkimeSession_t *session, void *uw, const uint8_t *data, int remaining, int which)
 {
@@ -776,7 +786,7 @@ LOCAL int http_parse(ArkimeSession_t *session, void *uw, const uint8_t *data, in
 
     http->which = dir;
 #ifdef HTTPDEBUG
-    LOG("HTTPDEBUG: enter %d - %d %.*s", http->dir, remaining, remaining, data);
+    LOG("HTTPDEBUG: enter %d - %d %.*s", dir, remaining, remaining, data);
 #endif
 
     if (http->isConnect) {
@@ -787,6 +797,7 @@ LOCAL int http_parse(ArkimeSession_t *session, void *uw, const uint8_t *data, in
 
             // Both sides have been reclassified, remove http parser
             if (http->reclassify == 0 && http->isConnect == 0x3) {
+                http_save(session, http, FALSE); // flush method counts before unregister
                 arkime_parsers_unregister(session, uw);
             }
             return 0;
@@ -932,7 +943,7 @@ void arkime_parser_init()
 
     arkime_field_define("http", "lotextfield",
                         "http.uri.tokens", "HTTP URI Tokens", "http.uriTokens",
-                        "URIs Tokens for request",
+                        "URI tokens for request",
                         ARKIME_FIELD_TYPE_STR_HASH, ARKIME_FIELD_FLAG_FAKE,
                         (char *)NULL);
 
@@ -1066,7 +1077,7 @@ void arkime_parser_init()
 
     cookieValueField = arkime_field_define("http", "termfield",
                                            "http.cookie.value", "HTTP Cookie Values", "http.cookieValue",
-                                           "The values to cookies sent up in requests",
+                                           "The values of cookies sent in requests",
                                            ARKIME_FIELD_TYPE_STR_HASH,  ARKIME_FIELD_FLAG_CNT,
                                            (char *)NULL);
 

@@ -17,6 +17,8 @@ use ArkimeTest;
 use Socket6 qw(AF_INET6 inet_pton);
 
 $main::userAgent = LWP::UserAgent->new(timeout => 20, keep_alive => 10);
+# Allow the self-signed cert used by mini-wise-source.js (https shutdown, etc)
+$main::userAgent->ssl_opts(SSL_verify_mode => 0, verify_hostname => 0);
 
 my $ELASTICSEARCH = $ENV{ELASTICSEARCH} = "http://127.0.0.1:9200";
 my $USERSELASTICSEARCH = $ENV{USERSELASTICSEARCH} || $ELASTICSEARCH;
@@ -145,6 +147,14 @@ sub sortObj {
             if ("$parentkey.$key" =~ /http.statuscode|icmp.type|icmp.code/) {
                 my @tmp = sort { $a <=> $b } (@{$obj->{$key}});
                 $obj->{$key} = \@tmp;
+            } elsif ($key eq "zeekintel") {
+                my @tmp = sort {
+                    ($a->{indicator_type} // '') cmp ($b->{indicator_type} // '')
+                        || ($a->{indicator} // '') cmp ($b->{indicator} // '')
+                        || ($a->{where} // '') cmp ($b->{where} // '')
+                        || ($a->{source} // '') cmp ($b->{source} // '')
+                } (@{$obj->{$key}});
+                $obj->{$key} = \@tmp;
             } else {
                 my @tmp = sort (@{$obj->{$key}});
                 $obj->{$key} = \@tmp;
@@ -255,7 +265,7 @@ my ($json) = @_;
         }
 
         if (exists $body->{dns}) {
-            for (my $i; $i < @{$body->{dns}}; $i++) {
+            for (my $i = 0; $i < @{$body->{dns}}; $i++) {
                 if (exists $body->{dns}[$i]->{ip}) {
                     for (my $j = 0; $j < @{$body->{dns}[$i]->{ip}}; $j++) {
                         if ($body->{dns}[$i]->{ip}[$j] =~ /:/) {
@@ -332,6 +342,7 @@ sub doShutdown {
     $main::userAgent->post("http://localhost:8125/regressionTests/shutdown");
     $main::userAgent->post("http://localhost:8126/regressionTests/shutdown");
     $main::userAgent->post("http://localhost:8127/regressionTests/shutdown");
+    $main::userAgent->post("http://localhost:8128/regressionTests/shutdown");
     $main::userAgent->post("http://localhost:8200/regressionTests/shutdown");
     $main::userAgent->post("http://localhost:8081/regressionTests/shutdown");
     $main::userAgent->post("http://localhost:8008/regressionTests/shutdown");
@@ -339,6 +350,7 @@ sub doShutdown {
     $main::userAgent->post("http://localhost:7200/regressionTests/shutdown");
     if (my $rs2 = IO::Socket::INET->new(PeerAddr => "127.0.0.1", PeerPort => 7379, Proto => "tcp")) { $rs2->autoflush(1); print $rs2 "*1\r\n\$8\r\nSHUTDOWN\r\n"; my $resp = <$rs2>; $rs2->close(); }
     eval { $main::userAgent->get("http://localhost:4566/_shutdown"); };
+    eval { $main::userAgent->get("https://localhost:9998/_shutdown"); };
 }
 
 sub doViewer {
@@ -375,16 +387,23 @@ my ($cmd) = @_;
         if ($main::debug) {
             system("perl mini-redis.pl --debug 7379 > /tmp/arkime.redis 2>&1 &");
             system("perl mini-aws.pl --debug 4566 > /tmp/arkime.aws 2>&1 &");
+            system("node mini-wise-source.js --debug 9998 > /tmp/arkime.wisesource 2>&1 &");
         } else {
             system("perl mini-redis.pl 7379 &");
             system("perl mini-aws.pl 4566 &");
+            system("node mini-wise-source.js 9998 > /dev/null &");
         }
+
+        # WISE connects to the mock Splunk/Databricks server at startup, so wait for it first
+        waitFor($ArkimeTest::host, 9998, 1);
+
+        # NODE_TLS_REJECT_UNAUTHORIZED=0 lets the databricks SDK accept the mock's self-signed cert
         my $wes = "-o 'wiseService.usersElasticsearch=$USERSELASTICSEARCH'";
         print ("Starting WISE\n");
         if ($main::debug) {
-            system("cd ../wiseService ; $node wiseService.js $wes $INSECURE --webcode thecode --webconfig --regressionTests -c ../tests/config.test.json > /tmp/arkime.wise &");
+            system("cd ../wiseService ; NODE_TLS_REJECT_UNAUTHORIZED=0 $node wiseService.js $wes $INSECURE --webcode thecode --webconfig --regressionTests -c ../tests/config.wise.yaml > /tmp/arkime.wise &");
         } else {
-            system("cd ../wiseService ; $node wiseService.js $wes $INSECURE --webcode thecode --webconfig --regressionTests -c ../tests/config.test.json > /dev/null &");
+            system("cd ../wiseService ; NODE_TLS_REJECT_UNAUTHORIZED=0 $node wiseService.js $wes $INSECURE --webcode thecode --webconfig --regressionTests -c ../tests/config.wise.yaml > /dev/null &");
         }
 
         waitFor($ArkimeTest::host, 8081, 1);
@@ -433,6 +452,7 @@ my ($cmd) = @_;
             system("cd ../viewer ; $node --trace-warnings viewer.js --regressionTests $es $ues -c ../tests/config.test.ini -n test2 --debug $INSECURE $s3 > /tmp/arkime.test2 &");
             system("cd ../viewer ; $node --trace-warnings viewer.js --regressionTests $es $ues -c ../tests/config.test.ini -n test3 --debug -o s2sRegressionTests=true $INSECURE > /tmp/arkime.test3 &");
             system("cd ../viewer ; $node --trace-warnings viewer.js --regressionTests $es $ues -c ../tests/config.test.ini -n test4 --debug $INSECURE > /tmp/arkime.test4 &");
+            system("cd ../viewer ; $node --trace-warnings viewer.js --regressionTests $es $ues -c ../tests/config.test.ini -n test5 --debug -o s2sRegressionTests=true $INSECURE > /tmp/arkime.test5 &");
             system("cd ../viewer ; $node --trace-warnings viewer.js --regressionTests $ues -c ../tests/config.test.ini -n all --debug $INSECURE > /tmp/arkime.all &");
             system("cd ../parliament ; $node --trace-warnings parliament.js --regressionTests $pues -c ../tests/parliament.tests.ini -n parliamenttest --debug $INSECURE > /tmp/arkime.parliament 2>&1 &");
             system("cd ../cont3xt ; $node --trace-warnings cont3xt.js $ces $cues --regressionTests -c ../tests/cont3xt.tests.ini --debug $INSECURE > /tmp/arkime.cont3xt 2>&1 &");
@@ -444,6 +464,7 @@ my ($cmd) = @_;
             system("cd ../viewer ; $node viewer.js --regressionTests $es $ues -c ../tests/config.test.ini -n test2 $INSECURE $s3 > /dev/null &");
             system("cd ../viewer ; $node viewer.js --regressionTests $es $ues -c ../tests/config.test.ini -n test3 -o s2sRegressionTests=true $INSECURE > /dev/null &");
             system("cd ../viewer ; $node viewer.js --regressionTests $es $ues -c ../tests/config.test.ini -n test4 $INSECURE > /dev/null &");
+            system("cd ../viewer ; $node viewer.js --regressionTests $es $ues -c ../tests/config.test.ini -n test5 -o s2sRegressionTests=true $INSECURE > /dev/null &");
             system("cd ../viewer ; $node viewer.js --regressionTests $ues -c ../tests/config.test.ini -n all $INSECURE > /dev/null &");
             system("cd ../parliament ; $node parliament.js --regressionTests $pues -c ../tests/parliament.tests.ini -n parliamenttest $INSECURE > /dev/null 2>&1 &");
             system("cd ../cont3xt ; $node cont3xt.js $ces $cues --regressionTests -c ../tests/cont3xt.tests.ini $INSECURE > /dev/null 2>&1 &");
@@ -581,7 +602,7 @@ if ($main::cmd eq "--fix") {
     print "$ARGV[0] [OPTIONS] [COMMAND] <pcap> files\n";
     print "Options:\n";
     print "  --elasticsearch <url>  Set elasticsearch URL\n";
-    print "  --debug                Turn on debuggin\n";
+    print "  --debug                Turn on debugging\n";
     print "  --valgrind             Use valgrind on capture\n";
     print "\n";
     print "Commands:\n";
@@ -592,6 +613,7 @@ if ($main::cmd eq "--fix") {
     print "                         This will init local ES, import data, start a viewer, run tests\n";
     print "  --api-fast             API tests without reloading data (alias for --viewerstart)\n";
     print "  --viewer               (legacy) Same as --api-full\n";
+    print "  --viewerload           Init local ES and import data (like --api-full), then exit before running tests\n";
     print "  --viewerstart          (legacy) Same as --api-fast\n";
     print "  --fuzz [fuzzoptions]   Run fuzzloch\n";
     print "  --fuzz2pcap            Convert list of fuzzloch crash file into matching pcap file\n";

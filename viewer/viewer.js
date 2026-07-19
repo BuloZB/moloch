@@ -285,6 +285,10 @@ app.get( // es health endpoint
   StatsAPIs.getESHealth
 );
 
+// pre-auth plugin router - plugins may register unauthenticated /plugin/* routes
+const prePluginRouter = express.Router();
+app.use('/plugin', prePluginRouter);
+
 // password, testing, or anonymous mode setup ---------------------------------
 Auth.app(app);
 
@@ -299,10 +303,17 @@ app.use(async (req, res, next) => {
       return res.status(401).send('receive session only allowed s2s');
     }
     try {
+      let s2sObj;
       if (Config.get('s2sRegressionTests')) {
-        JSON.parse(req.headers['x-arkime-auth']);
+        s2sObj = JSON.parse(req.headers['x-arkime-auth']);
       } else {
-        Auth.auth2obj(req.headers['x-arkime-auth']);
+        s2sObj = Auth.auth2obj(req.headers['x-arkime-auth']);
+      }
+      // A decryptable token is not enough: when a request is session-authenticated
+      // the s2s passport strategy is bypassed, so this gate is the only s2s check.
+      // Fully validate the token here too, not just that it decrypts/parses.
+      if (Auth.validateS2SObj(s2sObj, req)) {
+        return res.status(401).send('receive session only allowed s2s');
       }
       return next();
     } catch (e) {
@@ -582,6 +593,9 @@ async function checkHuntAccess (req, res, next) {
 }
 
 function checkEsAdminUser (req, res, next) {
+  if (req.user.hasRole('dbAdmin')) {
+    return next();
+  }
   if (internals.esAdminUsersSet) {
     if (internals.esAdminUsers.includes(req.user.userId)) {
       return next();
@@ -632,14 +646,23 @@ function logAction (uiPage) {
       log.range = req.query.stopTime - req.query.startTime;
     }
 
-    if (req.query.view && req.user.views) {
-      const view = req.user.views[req.query.view];
-      if (view) {
-        log.view = {
-          name: req.query.view,
-          expression: view.expression
-        };
-      }
+    // Views live in their own index now; resolve async and let finish() await it
+    let viewPromise;
+    if (req.query.view) {
+      viewPromise = (async () => {
+        try {
+          const roles = [...await req.user.getRoles()];
+          const view = await Db.getViewByIdOrName(req.query.view, req.user.userId, roles);
+          if (view) {
+            log.view = {
+              name: view.name,
+              expression: view.expression
+            };
+          }
+        } catch (err) {
+          // Not finding the view is not a reason to skip logging
+        }
+      })();
     }
 
     // save the request body
@@ -663,13 +686,15 @@ function logAction (uiPage) {
 
     req._arkimeStartTime = new Date();
 
-    function finish () {
+    async function finish () {
       res.removeListener('finish', finish);
 
       log.queryTime = new Date() - req._arkimeStartTime;
 
       if (req._arkimeESQuery) { log.esQuery = req._arkimeESQuery; }
       if (req._arkimeESQueryIndices) { log.esQueryIndices = req._arkimeESQueryIndices; }
+
+      if (viewPromise) { await viewPromise; }
 
       try {
         Db.historyIt(log, req.body.cluster ?? req.query.cluster);
@@ -802,7 +827,9 @@ function loadPlugins () {
       schemes.set(scheme, info);
     },
     getDb: function () { return Db; },
-    getPcap: function () { return Pcap; }
+    getPcap: function () { return Pcap; },
+    getPrePluginRouter: function () { return prePluginRouter; },
+    getPostPluginRouter: function () { return postPluginRouter; }
   };
   const plugins = Config.getArray('viewerPlugins', '');
   const dirs = Config.getArray('pluginsDir', `${version.config_prefix}/plugins`);
@@ -870,7 +897,7 @@ function sendSessionWorker (options, cb) {
     }
     if (!session) {
       console.log('no session', session, 'err', err, 'id', options.id);
-      return;
+      return cb();
     }
     session.id = options.id;
     session.packetPos = ps;
@@ -1177,6 +1204,11 @@ app.get('/about', User.checkPermissions(['webEnabled']), (req, res) => {
 // ============================================================================
 // APIS
 // ============================================================================
+
+// post-auth plugin router - plugins may register authenticated /plugin/* routes
+const postPluginRouter = express.Router();
+app.use('/plugin', postPluginRouter);
+
 app.all([
   '/user/current',
   '/user/create',
@@ -1582,31 +1614,31 @@ app.get( // OpenSearch/Elasticsearch indices endpoint
 
 app.delete( // delete OpenSearch/Elasticsearch index endpoint
   ['/api/esindices/:index'],
-  [ArkimeUtil.noCacheJson, recordResponseTime, User.checkRole('arkimeAdmin'), User.checkPermissions(['removeEnabled']), setCookie],
+  [ArkimeUtil.noCacheJson, recordResponseTime, User.checkAnyRole(['arkimeAdmin', 'dbAdmin']), User.checkPermissions(['removeEnabled']), setCookie],
   StatsAPIs.deleteESIndex
 );
 
 app.post( // optimize OpenSearch/Elasticsearch index endpoint
   ['/api/esindices/:index/optimize'],
-  [ArkimeUtil.noCacheJson, logAction(), checkCookieToken, User.checkRole('arkimeAdmin')],
+  [ArkimeUtil.noCacheJson, logAction(), checkCookieToken, User.checkAnyRole(['arkimeAdmin', 'dbAdmin'])],
   StatsAPIs.optimizeESIndex
 );
 
 app.post( // close OpenSearch/Elasticsearch index endpoint
   ['/api/esindices/:index/close'],
-  [ArkimeUtil.noCacheJson, logAction(), checkCookieToken, User.checkRole('arkimeAdmin')],
+  [ArkimeUtil.noCacheJson, logAction(), checkCookieToken, User.checkAnyRole(['arkimeAdmin', 'dbAdmin'])],
   StatsAPIs.closeESIndex
 );
 
 app.post( // open OpenSearch/Elasticsearch index endpoint
   ['/api/esindices/:index/open'],
-  [ArkimeUtil.noCacheJson, logAction(), checkCookieToken, User.checkRole('arkimeAdmin')],
+  [ArkimeUtil.noCacheJson, logAction(), checkCookieToken, User.checkAnyRole(['arkimeAdmin', 'dbAdmin'])],
   StatsAPIs.openESIndex
 );
 
 app.post( // shrink OpenSearch/Elasticsearch index endpoint
   ['/api/esindices/:index/shrink'],
-  [ArkimeUtil.noCacheJson, logAction(), checkCookieToken, User.checkRole('arkimeAdmin')],
+  [ArkimeUtil.noCacheJson, logAction(), checkCookieToken, User.checkAnyRole(['arkimeAdmin', 'dbAdmin'])],
   StatsAPIs.shrinkESIndex
 );
 
@@ -1618,7 +1650,7 @@ app.get( // OpenSearch/Elasticsearch tasks endpoint
 
 app.post( // cancel OpenSearch/Elasticsearch task endpoint
   ['/api/estasks/:id/cancel'],
-  [ArkimeUtil.noCacheJson, logAction(), checkCookieToken, User.checkRole('arkimeAdmin')],
+  [ArkimeUtil.noCacheJson, logAction(), checkCookieToken, User.checkAnyRole(['arkimeAdmin', 'dbAdmin'])],
   StatsAPIs.cancelESTask
 );
 
@@ -1631,7 +1663,7 @@ app.post( // cancel OpenSearch/Elasticsearch task by opaque id endpoint
 
 app.post( // cancel all OpenSearch/Elasticsearch tasks endpoint
   ['/api/estasks/cancelall'],
-  [ArkimeUtil.noCacheJson, logAction(), checkCookieToken, User.checkRole('arkimeAdmin')],
+  [ArkimeUtil.noCacheJson, logAction(), checkCookieToken, User.checkAnyRole(['arkimeAdmin', 'dbAdmin'])],
   StatsAPIs.cancelAllESTasks
 );
 
@@ -1685,19 +1717,19 @@ app.get( // OpenSearch/Elasticsearch shards endpoint
 
 app.post( // exclude OpenSearch/Elasticsearch shard endpoint
   ['/api/esshards/:type/:value/exclude'],
-  [ArkimeUtil.noCacheJson, logAction(), checkCookieToken, User.checkRole('arkimeAdmin')],
+  [ArkimeUtil.noCacheJson, logAction(), checkCookieToken, User.checkAnyRole(['arkimeAdmin', 'dbAdmin'])],
   StatsAPIs.excludeESShard
 );
 
 app.post( // include OpenSearch/Elasticsearch shard endpoint
   ['/api/esshards/:type/:value/include'],
-  [ArkimeUtil.noCacheJson, logAction(), checkCookieToken, User.checkRole('arkimeAdmin')],
+  [ArkimeUtil.noCacheJson, logAction(), checkCookieToken, User.checkAnyRole(['arkimeAdmin', 'dbAdmin'])],
   StatsAPIs.includeESShard
 );
 
-app.post( // include OpenSearch/Elasticsearch shard endpoint
+app.post( // delete OpenSearch/Elasticsearch shard endpoint
   ['/api/esshards/:index/:shard/delete'],
-  [ArkimeUtil.noCacheJson, logAction(), checkCookieToken, User.checkRole('arkimeAdmin')],
+  [ArkimeUtil.noCacheJson, logAction(), checkCookieToken, User.checkAnyRole(['arkimeAdmin', 'dbAdmin'])],
   StatsAPIs.deleteESShard
 );
 
@@ -2057,7 +2089,7 @@ app.get( // reverse dns endpoint
 // uploads apis ---------------------------------------------------------------
 app.post(
   ['/api/upload'],
-  [checkCookieToken, logAction(), multer({ dest: '/tmp', limits: internals.uploadLimits }).single('file')],
+  [checkCookieToken, logAction(), MiscAPIs.checkUpload, multer({ dest: '/tmp', limits: internals.uploadLimits }).single('file')],
   MiscAPIs.upload
 );
 
@@ -2239,9 +2271,6 @@ async function main () {
   setInterval(() => createActions('field-actions', 'makeFieldActions', 'fieldActions'), 150 * 1000); // Check every 2.5 minutes
 
   const viewHost = Config.get('viewHost', undefined);
-  if (internals.userNameHeader !== undefined && viewHost !== 'localhost' && viewHost !== '127.0.0.1') {
-    console.log('SECURITY WARNING - when userNameHeader is set, viewHost should be localhost or use iptables');
-  }
 
   const server = ArkimeUtil.createHttpServer(app, viewHost, Config.get('viewPort', '8005'));
   server.setTimeout(20 * 60 * 1000);
@@ -2253,13 +2282,13 @@ async function main () {
 function processArgs (argv) {
   for (let i = 0, ilen = argv.length; i < ilen; i++) {
     if (argv[i] === '--help') {
-      console.log('node.js [<options>]');
+      console.log('viewer.js [<options>]');
       console.log('');
       console.log('Options:');
       console.log('  -c, --config <file|url>  Where to fetch the config file from');
       console.log('  -n <node name>           Node name section to use in config file, default first part of hostname');
       console.log('  --debug                  Increase debug level, multiple are supported');
-      console.log('  --esprofile              Turn on profiling to es search queries');
+      console.log('  --esprofile              Turn on profiling of es search queries');
       console.log('  --host <host name>       Host name to use, default os hostname');
       console.log('  --insecure               Disable certificate verification for https calls');
 

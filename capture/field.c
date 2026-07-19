@@ -148,6 +148,12 @@ void arkime_field_define_json(const uint8_t *expression, int expression_len, con
         }
     }
 
+    if (!info->dbField) {
+        LOG("WARNING - Field %s has no dbField2 or fieldECS, skipping", info->expression);
+        arkime_field_free_info(info);
+        return;
+    }
+
     if (info->kind) {
         if (strncmp(info->kind, "lo", 2) == 0) {
             info->strKind = ARKIME_FIELD_STRKIND_LOWER;
@@ -586,6 +592,9 @@ int arkime_field_by_exp(const char *exp)
             info->type = ARKIME_FIELD_TYPE_STR_HASH;
         }
         info->pos = ARKIME_THREAD_INCROLD(config.maxDbField);
+        if (config.maxDbField >= config.minInternalField) {
+            LOGEXIT("ERROR - Max Fields is too large %d", config.maxDbField);
+        }
         config.fields[info->pos] = info;
         return info->pos;
     }
@@ -610,6 +619,9 @@ int arkime_field_by_exp_ignore_error(const char *exp)
             info->type = ARKIME_FIELD_TYPE_STR_HASH;
         }
         info->pos = ARKIME_THREAD_INCROLD(config.maxDbField);
+        if (config.maxDbField >= config.minInternalField) {
+            LOGEXIT("ERROR - Max Fields is too large %d", config.maxDbField);
+        }
         config.fields[info->pos] = info;
         return info->pos;
     }
@@ -669,7 +681,7 @@ const char *arkime_field_string_add(int pos, ArkimeSession_t *session, const cha
             hstring->len = len;
             hstring->utf8 = 0;
             hstring->uw = 0;
-            HASH_ADD(s_, *hash, hstring->str, hstring);
+            HASH_ADD_HASH(s_, *hash, arkime_string_hash_len(hstring->str, hstring->len), hstring->str, hstring);
             goto added;
         case ARKIME_FIELD_TYPE_STR_GHASH:
             field->ghash = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
@@ -698,9 +710,11 @@ const char *arkime_field_string_add(int pos, ArkimeSession_t *session, const cha
         field->str = (char *)string;
         goto added;
     case ARKIME_FIELD_TYPE_STR_ARRAY:
-        if (info->flags & ARKIME_FIELD_FLAG_DIFF_FROM_LAST &&
-            strncmp(field->sarray->pdata[field->sarray->len - 1], string, len) == 0) {
-            return NULL;
+        if (info->flags & ARKIME_FIELD_FLAG_DIFF_FROM_LAST) {
+            const char *last = g_ptr_array_index(field->sarray, field->sarray->len - 1);
+            if (strncmp(last, string, len) == 0 && last[len] == 0) {
+                return NULL;
+            }
         }
         if (copy)
             string = g_strndup(string, len);
@@ -750,6 +764,9 @@ added:
 /******************************************************************************/
 gboolean arkime_field_string_add_upper(int pos, ArkimeSession_t *session, const char *string, int len)
 {
+    if (pos < 0 || pos >= session->maxFields)
+        return FALSE;
+
     if (len < 0)
         len = strlen(string);
 
@@ -768,6 +785,9 @@ gboolean arkime_field_string_add_upper(int pos, ArkimeSession_t *session, const 
 /******************************************************************************/
 gboolean arkime_field_string_add_lower(int pos, ArkimeSession_t *session, const char *string, int len)
 {
+    if (pos < 0 || pos >= session->maxFields)
+        return FALSE;
+
     if (len < 0)
         len = strlen(string);
 
@@ -787,6 +807,9 @@ gboolean arkime_field_string_add_lower(int pos, ArkimeSession_t *session, const 
 gboolean arkime_field_string_add_host(int pos, ArkimeSession_t *session, char *string, int len)
 {
     char *host;
+
+    if (pos < 0 || pos >= session->maxFields)
+        return FALSE;
 
     if (len < 0) {
         len = strlen(string);
@@ -859,7 +882,7 @@ const char *arkime_field_string_uw_add(int pos, ArkimeSession_t *session, const 
             hstring->len = len;
             hstring->utf8 = 0;
             hstring->uw = uw;
-            HASH_ADD(s_, *hash, hstring->str, hstring);
+            HASH_ADD_HASH(s_, *hash, arkime_string_hash_len(hstring->str, hstring->len), hstring->str, hstring);
             if (info->ruleEnabled)
                 arkime_rules_run_field_set(session, pos, (const gpointer) string);
             return string;
@@ -1546,7 +1569,7 @@ int arkime_field_count(int pos, ArkimeSession_t *session)
     case ARKIME_FIELD_TYPE_STR_HASH:
         return HASH_COUNT(s_, *(field->shash));
     case ARKIME_FIELD_TYPE_INT_HASH:
-        return HASH_COUNT(s_, *(field->ihash));
+        return HASH_COUNT(i_, *(field->ihash));
     case ARKIME_FIELD_TYPE_IP_GHASH:
     case ARKIME_FIELD_TYPE_INT_GHASH:
     case ARKIME_FIELD_TYPE_STR_GHASH:
@@ -1909,7 +1932,7 @@ LOCAL gboolean arkime_field_load_field_remap(gpointer UNUSED(user_data))
         return G_SOURCE_REMOVE;
 
     for (int i = 0; i < (int)keys_len; i++) {
-        int oldPos = arkime_field_by_exp(keys[i]);
+        int oldPos = arkime_field_by_exp_ignore_error(keys[i]);
         if (oldPos == -1) {
             LOG("WARNING - Unknown field '%s', not remapping", keys[i]);
             continue;
@@ -1928,12 +1951,12 @@ LOCAL gboolean arkime_field_load_field_remap(gpointer UNUSED(user_data))
             g_strchomp(key);
             while (isspace(*value)) value++;
             g_strchomp(value);
-            int matchPos = arkime_field_by_exp(key);
+            int matchPos = arkime_field_by_exp_ignore_error(key);
             if (matchPos == -1) {
                 LOG("WARNING - Unknown field '%s', not remapping", key);
                 continue;
             }
-            int newPos = arkime_field_by_exp(value);
+            int newPos = arkime_field_by_exp_ignore_error(value);
             if (newPos == -1) {
                 LOG("WARNING - Unknown field '%s', not remapping", value);
                 continue;
@@ -2138,7 +2161,7 @@ void arkime_field_exit()
     }
 
     // Remove those are only in exp
-    HASH_FORALL_POP_HEAD2(d_, fieldsByExp, info) {
-        g_free(info->expression);
+    HASH_FORALL_POP_HEAD2(e_, fieldsByExp, info) {
+        arkime_field_free_info(info);
     }
 }

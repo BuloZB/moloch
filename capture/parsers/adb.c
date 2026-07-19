@@ -147,8 +147,11 @@ LOCAL void adb_parse_sync_payload(ArkimeSession_t *session, const uint8_t *data,
         }
 
         /* For SEND/RECV/STAT/LIST, the arg is the path length, followed by path */
-        if ((id == SYNC_SEND || id == SYNC_RECV || id == SYNC_STAT || id == SYNC_LIST) && arg > 0 && arg < 4096) {
-            if (BSB_REMAINING(bsb) >= arg) {
+        if ((id == SYNC_SEND || id == SYNC_RECV || id == SYNC_STAT || id == SYNC_LIST) && arg > 0) {
+            if (BSB_REMAINING(bsb) < arg) {
+                break;
+            }
+            if (arg < 4096) {
                 const uint8_t *path = BSB_WORK_PTR(bsb);
                 int path_len = MIN(arg, 1023);
                 char path_str[1024];
@@ -162,10 +165,10 @@ LOCAL void adb_parse_sync_payload(ArkimeSession_t *session, const uint8_t *data,
                 }
 
                 arkime_field_string_add(syncPathField, session, path_str, -1, TRUE);
-                BSB_IMPORT_skip(bsb, arg);
-            } else {
-                break;
             }
+            /* Always skip the full path payload, even when arg is too large to
+             * record, so parsing of subsequent sync messages doesn't desync. */
+            BSB_IMPORT_skip(bsb, arg);
         } else if (id == SYNC_DATA && arg > 0) {
             /* DATA packet - skip the data payload */
             if (BSB_REMAINING(bsb) >= arg) {
@@ -356,8 +359,9 @@ LOCAL void adb_parse_open(ArkimeSession_t *session, const uint8_t *data, int rem
             arkime_session_add_tag(session, "adb:sync");
         }
 
-        /* Check for shell v2 */
-        if (strncmp(service_str, "shell,v2:", 9) == 0 || strncmp(service_str, "shell,V2:", 9) == 0) {
+        /* Check for shell v2 — service string is "shell,v2[,args...]:[command]" */
+        if ((strncmp(service_str, "shell,v2", 8) == 0 || strncmp(service_str, "shell,V2", 8) == 0) &&
+            (service_str[8] == ':' || service_str[8] == ',')) {
             adb->shellV2[which] = 1;
             arkime_session_add_tag(session, "adb:shell-v2");
         }
@@ -390,42 +394,43 @@ LOCAL void adb_parse_client_server(ArkimeSession_t *session, const uint8_t *data
     /* Add data to buffer */
     arkime_parser_buf_add(adb->pb, which, data, remaining);
 
-    /* Need at least 4 bytes for hex length */
-    if (adb->pb->len[which] < 4)
-        return;
+    /* Process as many complete framed messages as are buffered */
+    while (adb->pb->len[which] >= 4) {
 
-    /* Check if we have a valid hex string */
-    if (adb->expectedLen[which] == 0) {
-        char hex_str[5];
-        memcpy(hex_str, adb->pb->buf[which], 4);
-        hex_str[4] = '\0';
+        /* Check if we have a valid hex string */
+        if (adb->expectedLen[which] == 0) {
+            char hex_str[5];
+            memcpy(hex_str, adb->pb->buf[which], 4);
+            hex_str[4] = '\0';
 
-        /* Validate hex string */
-        int valid = 1;
-        for (int i = 0; i < 4; i++) {
-            if (!isxdigit(hex_str[i])) {
-                valid = 0;
-                break;
+            /* Validate hex string */
+            int valid = 1;
+            for (int i = 0; i < 4; i++) {
+                if (!isxdigit(hex_str[i])) {
+                    valid = 0;
+                    break;
+                }
             }
-        }
 
-        if (valid) {
-            adb->expectedLen[which] = (uint32_t)strtoul(hex_str, NULL, 16);
-            if (adb->expectedLen[which] > 4096) {
-                /* Invalid length, reset */
-                adb->pb->len[which] = 0;
-                adb->expectedLen[which] = 0;
+            if (valid) {
+                adb->expectedLen[which] = (uint32_t)strtoul(hex_str, NULL, 16);
+                if (adb->expectedLen[which] > 4096) {
+                    /* Invalid length, reset */
+                    adb->pb->len[which] = 0;
+                    adb->expectedLen[which] = 0;
+                    return;
+                }
+            } else {
+                /* Not valid hex, might not be client-server protocol */
+                adb->isClientServer[which] = 0;
                 return;
             }
-        } else {
-            /* Not valid hex, might not be client-server protocol */
-            adb->isClientServer[which] = 0;
-            return;
         }
-    }
 
-    /* Check if we have complete message (4 bytes hex + service name) */
-    if ((uint32_t)adb->pb->len[which] >= 4 + adb->expectedLen[which]) {
+        /* Need complete message (4 bytes hex + service name) */
+        if ((uint32_t)adb->pb->len[which] < 4 + adb->expectedLen[which])
+            return;
+
         const uint8_t *service = adb->pb->buf[which] + 4;
         int service_len = adb->expectedLen[which];
 

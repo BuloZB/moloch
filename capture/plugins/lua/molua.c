@@ -87,7 +87,7 @@ LOCAL int molua_load_file(const char *name)
         }
 
         if (lua_pcall(L, 0, 0, 0)) {
-            LOGEXIT("Error initing %s: %s", name, lua_tostring(L, -1));
+            LOGEXIT("Error initializing %s: %s", name, lua_tostring(L, -1));
         }
     }
     return 0;
@@ -121,7 +121,7 @@ void arkime_plugin_init()
     }
 
     char **names = arkime_config_str_list(NULL, "luaFiles", NULL);
-    if (names && *names[0]) {
+    if (names && names[0]) {
         int i;
         for (i = 0; names[i]; i++) {
             molua_load_file(names[i]);

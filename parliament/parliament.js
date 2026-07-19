@@ -11,6 +11,11 @@
 const MIN_PARLIAMENT_VERSION = 7;
 const MIN_DB_VERSION = 79;
 
+// Cap the size of responses we accept from monitored clusters so a malicious
+// or misbehaving viewer/ES node can't exhaust Parliament's memory. Even very
+// large deployments produce health/stats payloads well under this.
+const MAX_CLUSTER_RESPONSE_SIZE = 10 * 1024 * 1024; // 10MB
+
 // ----------------------------------------------------------------------------
 // DEPENDENCIES
 // ----------------------------------------------------------------------------
@@ -262,6 +267,15 @@ class Parliament {
     }
   };
 
+  // allowlist of general settings that can be set via apiUpdateSettings, so
+  // clients can't write arbitrary keys into settings.general (mass assignment)
+  static generalSettingKeys = new Set([
+    'noPackets', 'noPacketsLength', 'outOfDate', 'esQueryTimeout',
+    'removeIssuesAfter', 'removeAcknowledgedAfter', 'lowDiskSpace',
+    'lowDiskSpaceType', 'lowDiskSpaceES', 'lowDiskSpaceESType',
+    'hostname', 'wiseUrl', 'cont3xtUrl', 'includeUrl'
+  ]);
+
   static async initialize (options) {
     Parliament.name = options.name;
 
@@ -321,9 +335,9 @@ class Parliament {
    * The Parliament settings.
    * @typedef ParliamentSettings
    * @type {object}
-   * @property {boolean} noPackets - The minimum number of packets that the capture node must receive. If the capture node is not receiving enough packets, a Low Packets issue is added to the cluster. You can set this value to -1 to ignore this issue altogether.
+   * @property {number} noPackets - The minimum number of packets that the capture node must receive. If the capture node is not receiving enough packets, a Low Packets issue is added to the cluster. You can set this value to -1 to ignore this issue altogether.
    * @property {number} noPacketsLength - The time range for how long the no packets issue must persist before adding an issue to the cluster. The default for this setting is 0 packets for 10 seconds.
-   * @property {boolean} outOfDate - How behind a node's cluster's timestamp can be from the current time. If the timestamp exceeds this time setting, an Out Of Date issue is added to the cluster. The default for this setting is 30 seconds.
+   * @property {number} outOfDate - How behind a node's cluster's timestamp can be from the current time. If the timestamp exceeds this time setting, an Out Of Date issue is added to the cluster. The default for this setting is 30 seconds.
    * @property {number} esQueryTimeout - The maximum Elasticsearch status query duration. If the query exceeds this time setting, an ES Down issue is added to the cluster. The default for this setting is 5 seconds.
    * @property {number} removeIssuesAfter - When an issue is removed if it has not occurred again. The issue is removed from the cluster after this time expires as long as the issue has not occurred again. The default for this setting is 60 minutes.
    * @property {number} removeAcknowledgedAfter - When an acknowledged issue is removed. The issue is removed from the cluster after this time expires (so you don't have to remove issues manually with the trashcan button). The default for this setting is 15 minutes.
@@ -401,6 +415,9 @@ class Parliament {
 
       // save general settings
       for (const s in req.body.settings.general) {
+        // ignore any keys that aren't known general settings
+        if (!Parliament.generalSettingKeys.has(s)) { continue; }
+
         let setting = req.body.settings.general[s];
 
         if (s === 'hostname') { // hostname must be a string
@@ -653,8 +670,8 @@ class Parliament {
       return res.serverError(422, 'A cluster must have a title.');
     }
 
-    if (!ArkimeUtil.isString(req.body.url) || !(req.body.url.startsWith('http') || req.body.url.startsWith('/'))) {
-      return res.serverError(422, 'A cluster must have a url that starts with http or /.');
+    if (!ArkimeUtil.isString(req.body.url) || !(req.body.url.startsWith('http') || req.body.url.startsWith('/')) || req.body.url.startsWith('//')) {
+      return res.serverError(422, 'A cluster must have a url that starts with http or / (and not //).');
     }
 
     if (req.body.description && !ArkimeUtil.isString(req.body.description)) {
@@ -665,8 +682,8 @@ class Parliament {
       return res.serverError(422, 'A cluster must have a string localUrl.');
     }
 
-    if (req.body.localUrl && !(req.body.localUrl.startsWith('http') || req.body.localUrl.startsWith('/'))) {
-      return res.serverError(422, 'A cluster localUrl must start with http or /.');
+    if (req.body.localUrl && (!(req.body.localUrl.startsWith('http') || req.body.localUrl.startsWith('/')) || req.body.localUrl.startsWith('//'))) {
+      return res.serverError(422, 'A cluster localUrl must start with http or / (and not //).');
     }
 
     if (req.body.type && !ArkimeUtil.isString(req.body.type)) {
@@ -773,8 +790,8 @@ class Parliament {
       return res.serverError(422, 'A cluster must have a title.');
     }
 
-    if (!ArkimeUtil.isString(req.body.url) || !(req.body.url.startsWith('http') || req.body.url.startsWith('/'))) {
-      return res.serverError(422, 'A cluster must have a url that starts with http or /.');
+    if (!ArkimeUtil.isString(req.body.url) || !(req.body.url.startsWith('http') || req.body.url.startsWith('/')) || req.body.url.startsWith('//')) {
+      return res.serverError(422, 'A cluster must have a url that starts with http or / (and not //).');
     }
 
     if (req.body.description && !ArkimeUtil.isString(req.body.description)) {
@@ -785,8 +802,8 @@ class Parliament {
       return res.serverError(422, 'A cluster must have a string localUrl.');
     }
 
-    if (req.body.localUrl && !(req.body.localUrl.startsWith('http') || req.body.localUrl.startsWith('/'))) {
-      return res.serverError(422, 'A cluster localUrl must start with http or /.');
+    if (req.body.localUrl && (!(req.body.localUrl.startsWith('http') || req.body.localUrl.startsWith('/')) || req.body.localUrl.startsWith('//'))) {
+      return res.serverError(422, 'A cluster localUrl must start with http or / (and not //).');
     }
 
     if (req.body.type && !ArkimeUtil.isString(req.body.type)) {
@@ -1083,7 +1100,10 @@ async function buildAlert (cluster, issue) {
 
   issue.alerted = Date.now();
 
-  const message = `${ArkimeUtil.safeStr(cluster.title)} - ${issue.message}`;
+  // escape the whole composed message: the cluster title, the remote node
+  // name, and any error values come from monitored clusters and must not be
+  // able to inject markup into notifier channels (email, etc.)
+  const message = ArkimeUtil.safeStr(`${cluster.title} - ${issue.message}`);
 
   for (const setNotifier of notifiers) {
 
@@ -1237,11 +1257,10 @@ function cleanUpIssues () {
       if (issue.provisional && timeSinceLastNoticed >= 10000) {
         issuesRemoved = true;
         issues.splice(len, 1);
-      }
 
       // remove all issues that have not been seen again for the removeIssuesAfter time, and
       // remove all acknowledged issues that have not been seen again for the removeAcknowledgedAfter time
-      if ((!issue.acknowledged && timeSinceLastNoticed > removeIssuesAfter) ||
+      } else if ((!issue.acknowledged && timeSinceLastNoticed > removeIssuesAfter) ||
           (issue.acknowledged && timeSinceLastNoticed > removeAcknowledgedAfter)) {
         issuesRemoved = true;
         issues.splice(len, 1);
@@ -1334,6 +1353,8 @@ function getHealth (cluster) {
       url: `${cluster.localUrl ?? cluster.url}/eshealth.json`,
       method: 'GET',
       httpsAgent: internals.httpsAgent,
+      maxContentLength: MAX_CLUSTER_RESPONSE_SIZE,
+      maxBodyLength: MAX_CLUSTER_RESPONSE_SIZE,
       timeout
     };
 
@@ -1383,6 +1404,8 @@ async function getStats (cluster) {
       url: `${cluster.localUrl ?? cluster.url}/api/parliament`,
       method: 'GET',
       httpsAgent: internals.httpsAgent,
+      maxContentLength: MAX_CLUSTER_RESPONSE_SIZE,
+      maxBodyLength: MAX_CLUSTER_RESPONSE_SIZE,
       timeout: Parliament.getGeneralSetting('esQueryTimeout') * 1000
     };
 
@@ -1416,16 +1439,16 @@ async function getStats (cluster) {
       for (const stat of stats.data) {
         // sum delta bytes per second
         if (stat.deltaBytesPerSec) {
-          cluster.deltaBPS += stat.deltaBytesPerSec;
+          cluster.deltaBPS += Number(stat.deltaBytesPerSec) || 0;
         }
 
         // sum delta total dropped per second
         if (stat.deltaTotalDroppedPerSec) {
-          cluster.deltaTDPS += stat.deltaTotalDroppedPerSec;
+          cluster.deltaTDPS += Number(stat.deltaTotalDroppedPerSec) || 0;
         }
 
         if (stat.monitoring) {
-          cluster.monitoring += stat.monitoring;
+          cluster.monitoring += Number(stat.monitoring) || 0;
         }
 
         if ((now - stat.currentTime) <= Parliament.getGeneralSetting('outOfDate') && stat.deltaPacketsPerSec > 0) {
@@ -1458,6 +1481,10 @@ async function getStats (cluster) {
             // if this issue has not been encountered yet, make a record of it
             noPacketsMap.set(id, Date.now());
           }
+        } else {
+          // the node is seeing packets again, clear the record so a future
+          // dip has to persist for noPacketsLength again
+          noPacketsMap.delete(cluster.title + ':' + stat.nodeName);
         }
 
         if (stat.deltaESDroppedPerSec > 0) {
@@ -1819,7 +1846,7 @@ app.get('/parliament/api/issues', (req, res, next) => {
     }
 
     // filter by search term
-    if (req.query.filter) {
+    if (typeof req.query.filter === 'string') {
       const searchTerm = req.query.filter.toLowerCase();
       return issue.severity.toLowerCase().includes(searchTerm) ||
           (issue.node && issue.node.toLowerCase().includes(searchTerm)) ||
@@ -1835,7 +1862,7 @@ app.get('/parliament/api/issues', (req, res, next) => {
 
   let type = 'string';
   const allowedSortFields = { ignoreUntil: 1, firstNoticed: 1, lastNoticed: 1, acknowledged: 1, title: 1, text: 1, node: 1, cluster: 1, message: 1, severity: 1, type: 1, value: 1 };
-  const sortBy = allowedSortFields[req.query.sort] ? req.query.sort : undefined;
+  const sortBy = (typeof req.query.sort === 'string' && Object.hasOwn(allowedSortFields, req.query.sort)) ? req.query.sort : undefined;
   if (sortBy === 'ignoreUntil' ||
     sortBy === 'firstNoticed' ||
     sortBy === 'lastNoticed' ||
@@ -1924,6 +1951,10 @@ app.put('/parliament/api/ignoreIssues', [isUser, checkCookieToken], (req, res, n
   }
 
   const ms = req.body.ms ?? 3600000; // Default to 1 hour
+  if (typeof ms !== 'number' || !Number.isFinite(ms)) {
+    return res.serverError(422, 'ms must be a finite number.');
+  }
+
   let ignoreUntil = Date.now() + ms;
   if (ms === -1) { ignoreUntil = -1; } // -1 means ignore it forever
 
@@ -2094,9 +2125,10 @@ app.use((err, req, res, next) => {
 // INITIALIZE
 // ----------------------------------------------------------------------------
 async function setupAuth () {
-  Auth.initialize({
+  await Auth.initialize({
     appAdminRole: 'parliamentAdmin',
-    passwordSecretSection: 'parliament'
+    passwordSecretSection: 'parliament',
+    hostVar: 'parliamentHost'
   });
 
   User.initialize({
@@ -2207,9 +2239,6 @@ async function main () {
   await setupAuth();
 
   const parliamentHost = ArkimeConfig.get('parliamentHost');
-  if (Auth.mode === 'header' && parliamentHost !== 'localhost' && parliamentHost !== '127.0.0.1') {
-    console.log('SECURITY WARNING - When using header auth, parliamentHost should be localhost or use iptables');
-  }
 
   ArkimeUtil.createHttpServer(app, parliamentHost, ArkimeConfig.get('port', 8008), async () => {
     if (ArkimeConfig.debug) {

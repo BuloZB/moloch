@@ -75,19 +75,19 @@ LOCAL void arkime_plugins_cmd_list(int UNUSED(argc), char UNUSED( * *argv), gpoi
 }
 
 /******************************************************************************/
-void arkime_plugins_load(char **plugins, gboolean loadParsers)
+void arkime_plugins_load(char **pluginsList, gboolean loadParsers)
 {
 
     if (!config.pluginsDir)
         return;
 
-    if (!plugins)
+    if (!pluginsList)
         return;
 
     arkime_add_can_quit((ArkimeCanQuitFunc)arkime_plugins_outstanding, "plugins outstanding");
 
-    for (int i = 0; plugins[i]; i++) {
-        const char *name = plugins[i];
+    for (int i = 0; pluginsList[i]; i++) {
+        const char *name = pluginsList[i];
 
         guint e;
         for (e = 0; e < extensionsArr->len; e++) {
@@ -151,7 +151,7 @@ LOCAL int arkime_plugins_load_so(const char *path)
     ArkimePluginInitFunc plugin_init;
 
     if (!g_module_symbol(plugin, "arkime_plugin_init", (gpointer *)(char *)&plugin_init) || plugin_init == NULL) {
-        LOG("ERROR - Module %s doesn't have a arkime_plugin_init", path);
+        LOG("ERROR - Module %s doesn't have an arkime_plugin_init", path);
         g_module_close(plugin);
         return 1;
     }
