@@ -1,9 +1,9 @@
+/******************************************************************************/
 /* http.c  -- Functions dealing with http connections.
  *
  * Copyright 2012-2017 AOL Inc. All rights reserved.
  *
  * SPDX-License-Identifier: Apache-2.0
- *
  */
 
 #define CURL_DISABLE_DEPRECATION
@@ -157,6 +157,8 @@ LOCAL size_t arkime_http_curl_write_callback(void *contents, size_t size, size_t
         curl_easy_getinfo(request->easy, CURLINFO_CONTENT_LENGTH_DOWNLOAD, &cl);
         if (cl < 0 || cl > 0x7FFFFFFF)
             cl = sz;
+        if (cl > 0x400000)
+            cl = 0x400000;
         request->used = sz;
         request->size = MAX(sz, (uint32_t)cl);
         request->dataIn = ARKIME_SIZE_ALLOC("dataIn", request->size + 1);
@@ -261,7 +263,10 @@ uint8_t *arkime_http_send_sync(void *serverV, const char *method, const char *ke
         key_len = strlen(key);
 
     if (key_len > 1000) {
-        LOGEXIT("ERROR - URL too long %.*s", key_len, key);
+        LOG("ERROR - Dropping request, URL too long: %.*s", key_len, key);
+        if (code)
+            *code = 0;
+        return NULL;
     }
 
     memcpy(server->syncRequest.key, key, key_len);
@@ -569,7 +574,7 @@ LOCAL size_t arkime_http_curlm_header_function(char *buffer, size_t size, size_t
     const char *end = buffer + i;
     *colon = 0;
     colon++;
-    while (colon < end && isspace((unsigned char) * colon)) colon++;
+    while (colon < end && isspace((unsigned char) *colon)) colon++;
 
     int valueLen = (int)(end - colon);
     if (valueLen < 0) valueLen = 0;
@@ -682,9 +687,9 @@ LOCAL int arkime_http_curl_close_callback(void *snameV, curl_socket_t fd)
         long ev = (long)g_hash_table_lookup(server->fd2ev, (void *)(long)fd);
         LOG("Couldn't connect %s (%d, %ld) ", sname->name, fd, ev);
         close(fd);
-        GSource *source = g_main_context_find_source_by_id (NULL, ev);
+        GSource *source = g_main_context_find_source_by_id(NULL, ev);
         if (source)
-            g_source_destroy (source);
+            g_source_destroy(source);
         g_hash_table_remove(server->fd2ev, (void *)(long)fd);
         return 0;
     }
@@ -768,7 +773,7 @@ LOCAL int arkime_http_curl_close_callback(void *snameV, curl_socket_t fd)
             conn ? "true" : "false");
     }
 
-    close (fd);
+    close(fd);
     return 0;
 }
 /******************************************************************************/
@@ -818,7 +823,12 @@ gboolean arkime_http_schedule2(void *serverV, const char *method, const char *ke
         key_len = strlen(key);
 
     if (key_len > 1000) {
-        LOGEXIT("ERROR - URL too long %.*s", key_len, key);
+        LOG("ERROR - Dropping request, URL too long: %.*s", key_len, key);
+        ARKIME_THREAD_INCR(server->dropped);
+        if (data) {
+            ARKIME_SIZE_FREE("data", data);
+        }
+        return 1;
     }
 
     // Are we overloaded
@@ -984,19 +994,19 @@ uint8_t *arkime_http_get(void *serverV, const char *key, int key_len, size_t *ml
 }
 
 /******************************************************************************/
-int arkime_http_queue_length(void *serverV)
+int arkime_http_queue_length(const void *serverV)
 {
     const ArkimeHttpServer_t  *server = serverV;
     return server ? server->outstanding : 0;
 }
 /******************************************************************************/
-int arkime_http_queue_length_best(void *serverV)
+int arkime_http_queue_length_best(const void *serverV)
 {
     const ArkimeHttpServer_t  *server = serverV;
     return server ? server->outstandingPri[ARKIME_HTTP_PRIORITY_BEST] : 0;
 }
 /******************************************************************************/
-uint64_t arkime_http_dropped_count(void *serverV)
+uint64_t arkime_http_dropped_count(const void *serverV)
 {
     const ArkimeHttpServer_t  *server = serverV;
     return server ? server->dropped : 0;

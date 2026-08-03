@@ -18,6 +18,7 @@ const LocalStrategy = require('passport-local');
 const express = require('express');
 const expressSession = require('express-session');
 const OIDC = require('openid-client');
+const jose = require('jose');
 const { LRUCache } = require('lru-cache');
 const bodyParser = require('body-parser');
 
@@ -112,6 +113,16 @@ class Auth {
     options.authConfig.oidcScope ??= ArkimeConfig.get('authOIDCScope', 'openid');
     options.authConfig.jwsAlgorithm ??= ArkimeConfig.get('authJwsAlgorithm', 'RS256');
 
+    // Bearer JWT verification, used by the MCP endpoint. Config driven so the
+    // same code covers any issuer (Okta, Athenz ZTS, ...)
+    options.authConfig.jwtIssuer ??= ArkimeConfig.get('authJwtIssuer');
+    options.authConfig.jwtJwksUrl ??= ArkimeConfig.get('authJwtJwksUrl');
+    options.authConfig.jwtAlgorithms ??= ArkimeConfig.get('authJwtAlgorithms', 'RS256');
+    options.authConfig.jwtAudience ??= ArkimeConfig.get('authJwtAudience');
+    options.authConfig.jwtUserIdPrefix ??= ArkimeConfig.get('authJwtUserIdPrefix');
+    options.authConfig.jwtRequiredScopes ??= ArkimeConfig.get('authJwtRequiredScopes');
+    options.authConfig.jwtClockSkew ??= ArkimeConfig.get('authJwtClockSkew', 60);
+
     if (ArkimeConfig.debug > 1) {
       console.log('Auth.initialize', options);
     }
@@ -185,6 +196,7 @@ class Auth {
     Auth.#userAuthIps = new iptrie.IPTrie();
     Auth.#s2sRegressionTests = options.s2sRegressionTests;
     Auth.#authConfig = options.authConfig;
+    Auth.#jwks = undefined; // rebuilt on next use, the jwks url may have changed
     Auth.#caTrustCerts = ArkimeUtil.certificateFileToArray(options.caTrustFile);
 
     if (Auth.#app && Auth.#authConfig?.trustProxy !== undefined) {
@@ -457,6 +469,238 @@ class Auth {
   }
 
   // ----------------------------------------------------------------------------
+  /* Turn a userId that an external system (proxy header, oidc, jwt) has already
+   * vouched for into an Arkime user: create it when auto create is configured,
+   * check it is enabled, and refresh its dynamic roles from the claims. */
+  static #resolveUser (userId, claims, done, authInfo) {
+    async function authCheck (err, user) {
+      if (err || !user) { return done('User not found'); }
+      if (!user.enabled) { return done('User not enabled'); }
+      if (!user.headerAuthEnabled) { return done('User header auth not enabled'); }
+
+      try {
+        await user.updateDynamicRoles(claims);
+      } catch (e) {
+        console.log('AUTH: updateDynamicRoles failed for', ArkimeUtil.sanitizeStr(user.userId), e);
+        return done('Failed to update dynamic roles');
+      }
+      user.setLastUsed();
+      return done(null, user, authInfo);
+    }
+
+    User.getUserCache(userId, (err, user) => {
+      if (Auth.#userAutoCreateTmpl === undefined && Auth.#userAutoCreateFuncs === undefined) {
+        return authCheck(err, user);
+      } else if ((err && err.toString().includes('Not Found')) || (!user)) { // Try dynamic creation
+        Auth.#dynamicCreate(userId, claims, authCheck);
+      } else {
+        return authCheck(err, user);
+      }
+    });
+  }
+
+  // ----------------------------------------------------------------------------
+  /* Authenticate using a username http header set by a trusted upstream proxy.
+   * Exposed via Auth.headerAuth() so the MCP endpoint can reuse it. */
+  static #headerAuth (req, done) {
+    if (Auth.#userNameHeader !== undefined && req.headers[Auth.#userNameHeader] === undefined) {
+      if (ArkimeConfig.debug > 0) {
+        console.log(`AUTH: didn't find ${Auth.#userNameHeader} in the headers`, req.headers);
+      }
+      return done(null, false);
+    }
+
+    if (Auth.#requiredAuthHeader !== undefined && Auth.#requiredAuthHeaderHmacs !== undefined) {
+      const authHeader = req.headers[Auth.#requiredAuthHeader];
+      if (authHeader === undefined) {
+        return done('Missing authorization header');
+      }
+      const authorized = authHeader.split(',').some(headerVal => {
+        const h = crypto.createHmac('sha256', 'compare').update(headerVal.trim()).digest();
+        return Auth.#requiredAuthHeaderHmacs.some(expected => crypto.timingSafeEqual(expected, h));
+      });
+      if (!authorized) {
+        console.log(`The required auth header '${Auth.#requiredAuthHeader}' did not match an expected value, got `, ArkimeUtil.sanitizeStr(authHeader));
+        return done('Bad authorization header');
+      }
+    }
+
+    let userId;
+    let vals;
+
+    if (Auth.mode === 'header-jwt') {
+      // No signature verification — the upstream proxy (ALB, Cloudflare Access, etc.)
+      // has already verified the JWT before forwarding the request.
+      try {
+        const jwt = req.headers[Auth.#userNameHeader];
+        const parts = jwt.split('.');
+        if (parts.length !== 3) {
+          return done('Invalid JWT in header');
+        }
+        const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
+        userId = payload[Auth.#authConfig.userIdField]?.toString().trim();
+        vals = payload;
+      } catch (e) {
+        console.log('AUTH: Failed to decode JWT from header', Auth.#userNameHeader, e.message);
+        return done('Failed to decode JWT');
+      }
+    } else {
+      // Node decodes HTTP header values as ISO-8859-1 (RFC 7230). Reverse proxies
+      // (Caddy, nginx, oauth2-proxy, ALB OIDC, etc.) typically write UTF-8 bytes
+      // directly into headers, so non-ASCII characters arrive as mojibake. Re-decode
+      // each string header from latin-1 bytes back to UTF-8 so auto-create
+      // expressions, dynamic roles, and downstream consumers see the original UTF-8
+      // string. Pure-ASCII values are unchanged.
+      vals = Auth.#utf8Headers(req.headers);
+      userId = vals[Auth.#userNameHeader].trim();
+    }
+
+    if (!userId || userId === '') {
+      return done('User name header is empty');
+    }
+
+    if (userId.startsWith('role:')) {
+      return done('Cannot authenticate with role');
+    }
+
+    return Auth.#resolveUser(userId, vals, done);
+  }
+
+  // ----------------------------------------------------------------------------
+  static #jwks;
+
+  /* Lazily build the remote JWKS, jose handles fetching/caching/key rotation */
+  static #getJwks () {
+    if (Auth.#jwks !== undefined) { return Auth.#jwks; }
+
+    const url = Auth.#authConfig.jwtJwksUrl;
+    if (!url) { throw new Error('authJwtJwksUrl is not set'); }
+
+    const options = {};
+    if (Auth.#caTrustCerts !== undefined) {
+      options.agent = new (require('https').Agent)({ ca: Auth.#caTrustCerts });
+    }
+
+    Auth.#jwks = jose.createRemoteJWKSet(new URL(url), options);
+    return Auth.#jwks;
+  }
+
+  // ----------------------------------------------------------------------------
+  /**
+   * Verify a Bearer JWT against the configured remote JWKS and return its claims.
+   * Throws when the token is missing, malformed, or fails any check.
+   */
+  static async verifyJwt (token) {
+    // Refuse to run half configured. Without an expected issuer and audience a
+    // valid token minted for some *other* service would authenticate here.
+    // Checked on every call, not just when the JWKS is first built.
+    if (!Auth.#authConfig.jwtIssuer) { throw new Error('authJwtIssuer is not set'); }
+    if (!Auth.#authConfig.jwtAudience) { throw new Error('authJwtAudience is not set'); }
+
+    const { payload } = await jose.jwtVerify(token, Auth.#getJwks(), {
+      issuer: Auth.#authConfig.jwtIssuer,
+      audience: Auth.#authConfig.jwtAudience.split(',').map(s => s.trim()).filter(s => s !== ''),
+      // Pinning the algorithms is what stops an attacker downgrading to `none`
+      // or swapping an RS256 verify for an HS256 one keyed off the public key
+      algorithms: Auth.#authConfig.jwtAlgorithms.split(',').map(s => s.trim()).filter(s => s !== ''),
+      clockTolerance: +Auth.#authConfig.jwtClockSkew
+    });
+
+    const required = Auth.#authConfig.jwtRequiredScopes?.split(',').map(s => s.trim()).filter(s => s !== '');
+    if (required?.length) {
+      const scopes = Array.isArray(payload.scp) ? payload.scp : (payload.scope ?? '').split(' ');
+      const missing = required.filter(s => !scopes.includes(s));
+      if (missing.length) { throw new Error(`Token missing required scope(s) ${missing.join(',')}`); }
+    }
+
+    return payload;
+  }
+
+  // ----------------------------------------------------------------------------
+  /* Pull the userId out of verified claims, honoring the optional principal
+   * prefix (Athenz sends sub=user.SHORT_ID).
+   *
+   * Uses authUserIdField, the same setting authMode=header-jwt already uses to
+   * name the claim holding the user id, rather than inventing a second one. */
+  static #jwtUserId (claims) {
+    const field = Auth.#authConfig.userIdField ?? 'sub';
+    let userId = claims[field];
+    if (typeof userId !== 'string' || userId.trim() === '') {
+      throw new Error(`Token has no ${field} claim`);
+    }
+    userId = userId.trim();
+
+    const prefix = Auth.#authConfig.jwtUserIdPrefix;
+    if (prefix) {
+      if (!userId.startsWith(prefix)) { throw new Error(`Token subject is not a ${prefix}* principal`); }
+      userId = userId.slice(prefix.length);
+    }
+
+    if (userId === '') { throw new Error('Token has an empty user id'); }
+    return userId;
+  }
+
+  // ----------------------------------------------------------------------------
+  /* Authenticate using a Bearer JWT we verify ourselves */
+  static #jwtAuth (req, done) {
+    const auth = req.headers.authorization;
+    if (auth === undefined || !auth.toLowerCase().startsWith('bearer ')) {
+      return done(null, false);
+    }
+
+    Auth.verifyJwt(auth.slice(7).trim()).then((claims) => {
+      let userId;
+      try {
+        userId = Auth.#jwtUserId(claims);
+      } catch (e) {
+        return done(e.message);
+      }
+
+      if (userId.startsWith('role:')) { return done('Cannot authenticate with role'); }
+
+      return Auth.#resolveUser(userId, claims, done);
+    }).catch((e) => {
+      if (ArkimeConfig.debug > 0) { console.log('AUTH: jwt verify failed', e.message); }
+      return done('Invalid token');
+    });
+  }
+
+  // ----------------------------------------------------------------------------
+  /* Run a single strategy and resolve to a user (or undefined). The MCP
+   * endpoint uses these instead of passport.authenticate because it needs full
+   * control of the failure response - it must answer 401 with a
+   * WWW-Authenticate header and must never redirect. */
+  static #runStrategy (fn, req) {
+    return new Promise((resolve, reject) => {
+      fn(req, (err, user) => {
+        if (err) { return reject(err instanceof Error ? err : new Error(err)); }
+        return resolve(user || undefined);
+      });
+    });
+  }
+
+  static headerAuth (req) { return Auth.#runStrategy(Auth.#headerAuth, req); }
+  static jwtAuth (req) { return Auth.#runStrategy(Auth.#jwtAuth, req); }
+  static regressionTestsAuth (req) { return Auth.#runStrategy(Auth.#regressionTestsAuth, req); }
+
+  // ----------------------------------------------------------------------------
+  /* Take the user straight from a query param. Only ever reachable when the
+   * process was started with --regressionTests. */
+  static #regressionTestsAuth (req, done) {
+    const userId = req?.query?.arkimeRegressionUser ?? 'anonymous';
+    if (userId.startsWith('role:')) {
+      return done('Cannot authenticate with role');
+    }
+
+    User.getUserCache(userId, (err, user) => {
+      if (user) {
+        user.setLastUsed();
+      }
+      return done(null, user);
+    });
+  }
+
+  // ----------------------------------------------------------------------------
   /* Register all the strategies that are supported */
   static async #registerStrategies () {
     // ----------------------------------------------------------------------------
@@ -556,92 +800,7 @@ class Auth {
     }));
 
     // ----------------------------------------------------------------------------
-    passport.use('header', new CustomStrategy((req, done) => {
-      if (Auth.#userNameHeader !== undefined && req.headers[Auth.#userNameHeader] === undefined) {
-        if (ArkimeConfig.debug > 0) {
-          console.log(`AUTH: didn't find ${Auth.#userNameHeader} in the headers`, req.headers);
-        }
-        return done(null, false);
-      }
-
-      if (Auth.#requiredAuthHeader !== undefined && Auth.#requiredAuthHeaderHmacs !== undefined) {
-        const authHeader = req.headers[Auth.#requiredAuthHeader];
-        if (authHeader === undefined) {
-          return done('Missing authorization header');
-        }
-        const authorized = authHeader.split(',').some(headerVal => {
-          const h = crypto.createHmac('sha256', 'compare').update(headerVal.trim()).digest();
-          return Auth.#requiredAuthHeaderHmacs.some(expected => crypto.timingSafeEqual(expected, h));
-        });
-        if (!authorized) {
-          console.log(`The required auth header '${Auth.#requiredAuthHeader}' did not match an expected value, got `, ArkimeUtil.sanitizeStr(authHeader));
-          return done('Bad authorization header');
-        }
-      }
-
-      let userId;
-      let vals;
-
-      if (Auth.mode === 'header-jwt') {
-        // No signature verification — the upstream proxy (ALB, Cloudflare Access, etc.)
-        // has already verified the JWT before forwarding the request.
-        try {
-          const jwt = req.headers[Auth.#userNameHeader];
-          const parts = jwt.split('.');
-          if (parts.length !== 3) {
-            return done('Invalid JWT in header');
-          }
-          const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
-          userId = payload[Auth.#authConfig.userIdField]?.toString().trim();
-          vals = payload;
-        } catch (e) {
-          console.log('AUTH: Failed to decode JWT from header', Auth.#userNameHeader, e.message);
-          return done('Failed to decode JWT');
-        }
-      } else {
-        // Node decodes HTTP header values as ISO-8859-1 (RFC 7230). Reverse proxies
-        // (Caddy, nginx, oauth2-proxy, ALB OIDC, etc.) typically write UTF-8 bytes
-        // directly into headers, so non-ASCII characters arrive as mojibake. Re-decode
-        // each string header from latin-1 bytes back to UTF-8 so auto-create
-        // expressions, dynamic roles, and downstream consumers see the original UTF-8
-        // string. Pure-ASCII values are unchanged.
-        vals = Auth.#utf8Headers(req.headers);
-        userId = vals[Auth.#userNameHeader].trim();
-      }
-
-      if (!userId || userId === '') {
-        return done('User name header is empty');
-      }
-
-      if (userId.startsWith('role:')) {
-        return done('Cannot authenticate with role');
-      }
-
-      async function headerAuthCheck (err, user) {
-        if (err || !user) { return done('User not found'); }
-        if (!user.enabled) { return done('User not enabled'); }
-        if (!user.headerAuthEnabled) { return done('User header auth not enabled'); }
-
-        try {
-          await user.updateDynamicRoles(vals);
-        } catch (e) {
-          console.log('AUTH: updateDynamicRoles failed for', ArkimeUtil.sanitizeStr(user.userId), e);
-          return done('Failed to update dynamic roles');
-        }
-        user.setLastUsed();
-        return done(null, user);
-      }
-
-      User.getUserCache(userId, (err, user) => {
-        if (Auth.#userAutoCreateTmpl === undefined && Auth.#userAutoCreateFuncs === undefined) {
-          return headerAuthCheck(err, user);
-        } else if ((err && err.toString().includes('Not Found')) || (!user)) { // Try dynamic creation
-          Auth.#dynamicCreate(userId, vals, headerAuthCheck);
-        } else {
-          return headerAuthCheck(err, user);
-        }
-      });
-    }));
+    passport.use('header', new CustomStrategy(Auth.#headerAuth));
 
     // ----------------------------------------------------------------------------
     if (Auth.mode === 'oidc') {
@@ -689,30 +848,7 @@ class Auth {
           return done('Cannot authenticate with role');
         }
 
-        async function oidcAuthCheck (err, user) {
-          if (err || !user) { return done('User not found'); }
-          if (!user.enabled) { return done('User not enabled'); }
-          if (!user.headerAuthEnabled) { return done('User header auth not enabled'); }
-
-          try {
-            await user.updateDynamicRoles(userinfo);
-          } catch (e) {
-            console.log('AUTH: updateDynamicRoles failed for', ArkimeUtil.sanitizeStr(user.userId), e);
-            return done('Failed to update dynamic roles');
-          }
-          user.setLastUsed();
-          return done(null, user, { id_token: tokenSet.id_token });
-        }
-
-        User.getUserCache(userId, (err, user) => {
-          if (Auth.#userAutoCreateTmpl === undefined && Auth.#userAutoCreateFuncs === undefined) {
-            return oidcAuthCheck(err, user);
-          } else if ((err && err.toString().includes('Not Found')) || (!user)) { // Try dynamic creation
-            Auth.#dynamicCreate(userId, userinfo, oidcAuthCheck);
-          } else {
-            return oidcAuthCheck(err, user);
-          }
-        });
+        return Auth.#resolveUser(userId, userinfo, done, { id_token: tokenSet.id_token });
       }));
     }
 
@@ -737,42 +873,17 @@ class Auth {
     }));
 
     // ----------------------------------------------------------------------------
-    passport.use('regressionTests', new CustomStrategy((req, done) => {
-      const userId = req?.query?.arkimeRegressionUser ?? 'anonymous';
-      if (userId.startsWith('role:')) {
-        return done('Cannot authenticate with role');
-      }
-
-      User.getUserCache(userId, (err, user) => {
-        if (user) {
-          user.setLastUsed();
-        }
-        return done(null, user);
-      });
-    }));
+    passport.use('regressionTests', new CustomStrategy(Auth.#regressionTestsAuth));
 
     // ----------------------------------------------------------------------------
     passport.use('s2s', new CustomStrategy(async (req, done) => {
-      let obj = req.headers['x-arkime-auth'];
-
-      if (obj === undefined) {
+      if (req.headers['x-arkime-auth'] === undefined) {
         return done(null, false);
       }
 
-      try {
-        if (Auth.#s2sRegressionTests) {
-          obj = JSON.parse(obj);
-        } else {
-          obj = Auth.auth2obj(obj);
-        }
-      } catch (e) {
-        console.log('AUTH: x-arkime-auth corrupt', e);
-        return done('S2S auth header corrupt');
-      }
-
-      const s2sError = Auth.validateS2SObj(obj, req);
-      if (s2sError) {
-        return done(s2sError);
+      const { obj, error } = Auth.parseS2SRequest(req);
+      if (error) {
+        return done(error);
       }
 
       // Don't look up user for receiveSession
@@ -943,7 +1054,18 @@ class Auth {
       return;
     }
 
-    if (typeof (req.isAuthenticated) === 'function' && req.isAuthenticated()) {
+    // A packet portal request comes from a remote peer but is served on a
+    // synthetic socket (see H2Socket) whose 127.0.0.1 source address is a
+    // stand-in, not a connection from anywhere. That address, any userNameHeader
+    // and any session cookie the peer sends are therefore all untrustworthy: the
+    // first two would let header auth take the peer's word for the user, since
+    // what gates it is the userAuthIps loopback default, and the last would skip
+    // authentication entirely at the isAuthenticated() check below. Authenticate
+    // with the s2s token only -- on top of PacketPortal's own gate, which
+    // required a valid s2s token before the request ever reached the app.
+    const portal = req.socket?.arkimePacketPortal === true;
+
+    if (!portal && typeof (req.isAuthenticated) === 'function' && req.isAuthenticated()) {
       return next();
     }
 
@@ -951,7 +1073,9 @@ class Auth {
       req.url = req.url.replace('/', Auth.#basePath);
     }
 
-    if (req.url.toLowerCase() !== '/api/login' && req.originalUrl !== '/' && req.session && req._parsedUrl.pathname !== '/auth/login/callback') {
+    // A portal request is never a browser being sent to a login page, and must
+    // not write to whatever session a cookie it carries happens to name
+    if (!portal && req.url.toLowerCase() !== '/api/login' && req.originalUrl !== '/' && req.session && req._parsedUrl.pathname !== '/auth/login/callback') {
       // save the original url so we can redirect after successful login
       // the ogurl is saved in the form login page and accessed using req.body.ogurl
       req.session.ogurl = Buffer.from(Auth.obj2authNext(req.originalUrl)).toString('base64');
@@ -968,7 +1092,12 @@ class Auth {
       passportAuthOptionsExtra.session = false;
     }
 
-    passport.authenticate(Auth.#strategies, { ...Auth.#passportAuthOptions, ...passportAuthOptionsExtra })(req, res, function (err) {
+    // A portal request must never mint or attach a session either
+    if (portal) { passportAuthOptionsExtra.session = false; }
+
+    const strategies = portal ? ['s2s'] : Auth.#strategies;
+
+    passport.authenticate(strategies, { ...Auth.#passportAuthOptions, ...passportAuthOptionsExtra })(req, res, function (err) {
       if (req.session !== undefined && req.authInfo?.id_token !== undefined) {
         req.session.id_token ??= req.authInfo.id_token;
       }
@@ -1177,7 +1306,8 @@ class Auth {
 
       return JSON.parse(decrypted);
     } catch (error) {
-      console.log(error);
+      // debug only, an unauthenticated peer can trigger this at will
+      if (ArkimeConfig.debug > 0) { console.log(error); }
       throw new Error('Incorrect auth supplied');
     }
   }
@@ -1217,9 +1347,37 @@ class Auth {
       d += c.final('utf8');
       return JSON.parse(d);
     } catch (error) {
-      console.log(error);
+      // debug only, an unauthenticated peer can trigger this at will
+      if (ArkimeConfig.debug > 0) { console.log(error); }
       throw new Error('Incorrect auth supplied');
     }
+  }
+
+  // ----------------------------------------------------------------------------
+  // Parse and fully validate a request's x-arkime-auth header. Returns
+  // { obj } when it is a genuine s2s token for this request, otherwise
+  // { error }. Anything that needs to make its own s2s decision (the s2s
+  // passport strategy, the packet portal) should use this rather than calling
+  // auth2obj on its own, which only proves the token decrypts.
+  static parseS2SRequest (req) {
+    const auth = req.headers['x-arkime-auth'];
+    if (auth === undefined) { return { error: 'Missing x-arkime-auth' }; }
+
+    // Anything present but unusable (empty, duplicated header, not a string) is
+    // a corrupt token rather than a missing one -- auth2obj throws on all of it
+    let obj;
+    try {
+      obj = Auth.#s2sRegressionTests ? JSON.parse(auth) : Auth.auth2obj(auth);
+    } catch (e) {
+      // debug only, an unauthenticated peer can trigger this at will
+      if (ArkimeConfig.debug > 0) { console.log('AUTH: x-arkime-auth corrupt', e); }
+      return { error: 'S2S auth header corrupt' };
+    }
+
+    const error = Auth.validateS2SObj(obj, req);
+    if (error) { return { error }; }
+
+    return { obj };
   }
 
   // ----------------------------------------------------------------------------

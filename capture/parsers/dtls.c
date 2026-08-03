@@ -2,6 +2,8 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+#define OPENSSL_SUPPRESS_DEPRECATED
+#include <openssl/sha.h>
 #include "arkime.h"
 
 //#define DTLSDEBUG 1
@@ -133,7 +135,7 @@ LOCAL uint32_t dtls_process_client_hello(ArkimeSession_t *session, const uint8_t
     BSB_IMPORT_skip(cbsb, skiplen);  // Cookie
 
     BSB_IMPORT_u16(cbsb, skiplen);   // Cipher Suites Length
-    while (BSB_NOT_ERROR(cbsb) && skiplen > 0) {
+    while (BSB_NOT_ERROR(cbsb) && skiplen >= 2) {
         uint16_t c = 0;
         BSB_IMPORT_u16(cbsb, c);
         if (!dtls_is_grease_value(c)) {
@@ -144,6 +146,7 @@ LOCAL uint32_t dtls_process_client_hello(ArkimeSession_t *session, const uint8_t
         }
         skiplen -= 2;
     }
+    BSB_IMPORT_skip(cbsb, skiplen);  // Odd declared length leaves a trailing byte
     BSB_IMPORT_u08(cbsb, skiplen);   // Compression Length
     BSB_IMPORT_skip(cbsb, skiplen);  // Compressions
 
@@ -203,12 +206,12 @@ LOCAL uint32_t dtls_process_client_hello(ArkimeSession_t *session, const uint8_t
 
                 uint16_t llen = 0;
                 BSB_IMPORT_u16(bsb, llen); // list len
-                while (llen > 0 && !BSB_IS_ERROR(bsb)) {
+                BSB_SHRINK_REMAINING(bsb, llen);
+                while (BSB_REMAINING(bsb) >= 2) {
                     uint16_t a = 0;
                     BSB_IMPORT_u16(bsb, a);
                     if (ja4NumAlgos < ARRAY_LEN(ja4Algos))
                         ja4Algos[ja4NumAlgos++] = a;
-                    llen -= 2;
                 }
             } else if (etype == 0x10) { // ALPN
                 if (ja4NumExtensionsSome > 0)
@@ -230,7 +233,8 @@ LOCAL uint32_t dtls_process_client_hello(ArkimeSession_t *session, const uint8_t
 
                 uint16_t llen = 0;
                 BSB_IMPORT_u08(bsb, llen); // list len
-                while (llen > 0 && !BSB_IS_ERROR(bsb)) {
+                BSB_SHRINK_REMAINING(bsb, llen);
+                while (BSB_REMAINING(bsb) >= 2) {
                     uint16_t supported_version = 0;
                     BSB_IMPORT_u16(bsb, supported_version);
                     if (!dtls_is_grease_value(supported_version)) {
@@ -242,7 +246,6 @@ LOCAL uint32_t dtls_process_client_hello(ArkimeSession_t *session, const uint8_t
                         else
                             ver = MIN(supported_version, ver);
                     }
-                    llen -= 2;
                 }
             } else {
                 BSB_IMPORT_skip(ebsb, elen);
@@ -271,7 +274,8 @@ LOCAL uint32_t dtls_process_client_hello(ArkimeSession_t *session, const uint8_t
 
     BSB_EXPORT_ptr(ja4_rbsb, ja4, 11);
 
-    char tmpBuf[5 * 256];
+    // Sized for the larger of the cipher leg and the extensions+algos leg
+    char tmpBuf[5 * ARRAY_LEN(ja4Extensions) + 1 + 5 * ARRAY_LEN(ja4Algos) + 5 * ARRAY_LEN(ja4Ciphers)];
     BSB tmpBSB;
 
     // Sort ciphers, convert to hex, first 12 bytes of sha256
@@ -287,12 +291,13 @@ LOCAL uint32_t dtls_process_client_hello(ArkimeSession_t *session, const uint8_t
 
     BSB_EXPORT_u08(ja4_rbsb, '_');
 
-    GChecksum *const checksum = arkimeThreadData[session->thread].checksum256;
+    uint8_t digest[SHA256_DIGEST_LENGTH];
+    char    hex[SHA256_DIGEST_LENGTH * 2 + 1];
 
     if (BSB_LENGTH(tmpBSB) > 0) {
-        g_checksum_update(checksum, (guchar *)tmpBuf, BSB_LENGTH(tmpBSB));
-        memcpy(ja4 + 11, g_checksum_get_string(checksum), 12);
-        g_checksum_reset(checksum);
+        SHA256((uint8_t *)tmpBuf, BSB_LENGTH(tmpBSB), digest);
+        arkime_sprint_hex_string(hex, digest, 6);
+        memcpy(ja4 + 11, hex, 12);
     } else {
         memcpy(ja4 + 11, "000000000000", 12);
     }
@@ -320,17 +325,17 @@ LOCAL uint32_t dtls_process_client_hello(ArkimeSession_t *session, const uint8_t
     BSB_EXPORT_u08(ja4_rbsb, 0);
 
     if (BSB_LENGTH(tmpBSB) > 0) {
-        g_checksum_update(checksum, (guchar *)tmpBuf, BSB_LENGTH(tmpBSB));
-        memcpy(ja4 + 24, g_checksum_get_string(checksum), 12);
-        g_checksum_reset(checksum);
+        SHA256((uint8_t *)tmpBuf, BSB_LENGTH(tmpBSB), digest);
+        arkime_sprint_hex_string(hex, digest, 6);
+        memcpy(ja4 + 24, hex, 12);
     } else {
         memcpy(ja4 + 24, "000000000000", 12);
     }
 
     // Add the field
     arkime_field_string_add(ja4Field, session, ja4, 36, TRUE);
-    if (ja4Raw) {
-        arkime_field_string_add(ja4RawField, session, ja4_r, BSB_LENGTH(ja4_rbsb), TRUE);
+    if (ja4Raw && BSB_NOT_ERROR(ja4_rbsb)) {
+        arkime_field_string_add(ja4RawField, session, ja4_r, BSB_LENGTH(ja4_rbsb) - 1, TRUE);
     }
     return 0;
 }

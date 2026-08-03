@@ -158,14 +158,16 @@ LOCAL void sctp_add_data(ArkimeSCTP_t *sctp, uint32_t tsn, int which, BSB *const
 LOCAL void sctp_send_data(ArkimeSession_t *const session, const uint8_t *data, int len, uint32_t protoId, int which)
 {
     int dir = ARKIME_WHICH_GET_DIR(which);
+    // TODO dev7: multiplexed SCTP streams need per-stream sessions. For now flatten
+    // the packed stream id to direction so parsers don't OOB their [2] arrays.
     if (session->firstBytesLen[dir] == 0) {
         session->firstBytesLen[dir] = MIN(8, len);
         memcpy(session->firstBytes[dir], data, session->firstBytesLen[dir]);
-        arkime_parsers_classify_sctp(session, protoId, data, len, which);
+        arkime_parsers_classify_sctp(session, protoId, data, len, dir);
         arkime_field_int_add(protoIdField, session, (int)protoId);
     }
 
-    arkime_packet_process_data(session, data, len, which);
+    arkime_packet_process_data(session, data, len, dir);
 }
 
 /******************************************************************************/
@@ -314,6 +316,11 @@ LOCAL int sctp_packet_process(ArkimeSession_t *const session, ArkimePacket_t *co
                 if (SCTP_DATA_FLAG_SEND_NOW(chunkFlags)) {
                     sctp_send_data(session, BSB_WORK_PTR(cbsb), BSB_REMAINING(cbsb), payloadProtoId, which);
                 } else {
+                    if (DLL_COUNT(sd_, &session->sctpData) > maxSctpOutOfOrderPackets) {
+                        arkime_session_add_tag(session, "incomplete-sctp");
+                        session->stopTCP = 1;
+                        return 1;
+                    }
                     sctp_add_data(&session->sctpData, tsn, which, &cbsb, chunkFlags, payloadProtoId);
                 }
 

@@ -1,5 +1,5 @@
 # ESProxy
-use Test::More tests => 37;
+use Test::More tests => 46;
 use ArkimeTest;
 use Cwd;
 use URI::Escape;
@@ -19,6 +19,14 @@ is ($response->code, 401);
 
 $response = $ArkimeTest::userAgent->get("http://test:test\@$ArkimeTest::host:7200");
 is ($response->code, 200);
+
+# A sensor name that resolves on Object.prototype is not a configured sensor. It
+# has no pass and no ip, so a plain [] lookup would authenticate it with any
+# password and proxy its requests (user docs, session docs) to elasticsearch.
+foreach my $name ("__proto__", "constructor", "toString", "hasOwnProperty") {
+    $response = $ArkimeTest::userAgent->get("http://$name:anything\@$ArkimeTest::host:7200/tests_users/_doc/formtestuser");
+    is ($response->code, 401, "sensor '$name' is not authenticated");
+}
 
 $response = $ArkimeTest::userAgent->get("http://test:test\@$ArkimeTest::host:7200/_search");
 is ($response->code, 400);
@@ -157,4 +165,30 @@ $req->header('Content-Type' => 'application/x-ndjson');
 $req->content($bulk_multi_op);
 $response = $ArkimeTest::userAgent->request($req);
 is ($response->code, 400, "bulk with multiple ops in one line rejected");
+is ($response->content, "Not authorized for API");
+
+# Sessions search - rootId term query is allowed
+my $search_rootid = qq({"size":1000,"_source":["rootId"],"query":{"term":{"rootId":"240101-abc"}}});
+$req = HTTP::Request->new('POST', "http://test:test\@$ArkimeTest::host:7200/tests_sessions3-2024/_search");
+$req->header('Content-Type' => 'application/json');
+$req->content($search_rootid);
+$response = $ArkimeTest::userAgent->request($req);
+is ($response->code, 200, "sessions search by rootId allowed");
+
+# Sessions search - term on any other field is rejected
+my $search_other = qq({"query":{"term":{"node":"foo"}}});
+$req = HTTP::Request->new('POST', "http://test:test\@$ArkimeTest::host:7200/tests_sessions3-2024/_search");
+$req->header('Content-Type' => 'application/json');
+$req->content($search_other);
+$response = $ArkimeTest::userAgent->request($req);
+is ($response->code, 400, "sessions search by other term rejected");
+is ($response->content, "Not authorized for API");
+
+# Sessions search - rootId alongside another clause is rejected
+my $search_extra = qq({"query":{"term":{"rootId":"240101-abc"},"match_all":{}}});
+$req = HTTP::Request->new('POST', "http://test:test\@$ArkimeTest::host:7200/tests_sessions3-2024/_search");
+$req->header('Content-Type' => 'application/json');
+$req->content($search_extra);
+$response = $ArkimeTest::userAgent->request($req);
+is ($response->code, 400, "sessions search with extra query clause rejected");
 is ($response->content, "Not authorized for API");

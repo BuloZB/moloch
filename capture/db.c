@@ -5,6 +5,8 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+#define OPENSSL_SUPPRESS_DEPRECATED
+#include <openssl/sha.h>
 #include "arkime.h"
 #include "arkimeconfig.h"
 #include <sys/types.h>
@@ -28,9 +30,6 @@ LOCAL MMDB_s           *geoASN;
 #define ARKIME_MIN_DB_VERSION 83
 
 int                     arkimeDbVersion = 0;
-extern uint64_t         totalPackets;
-LOCAL  uint64_t         totalSessions ARKIME_CACHE_ALIGN = 0;
-LOCAL  uint64_t         totalSessionBytes ARKIME_CACHE_ALIGN;
 LOCAL  uint16_t         myPid;
 extern uint32_t         pluginsCbs;
 
@@ -71,8 +70,6 @@ LOCAL int               arkime_session_save_func;
 
 LOCAL GRegex           *numRegex;
 LOCAL GRegex           *numHexRegex;
-
-extern uint64_t         packetStats[ARKIME_PACKET_MAX];
 
 /******************************************************************************/
 extern ArkimeConfig_t        config;
@@ -162,6 +159,37 @@ void arkime_db_js0n_str(BSB *bsb, uint8_t *in, gboolean utf8)
 {
     BSB_EXPORT_u08(*bsb, '"');
     while (*in) {
+        // batch a run of bytes that pass through unchanged
+        const uint8_t *start = in;
+        while (*in) {
+            if (*in >= 0x20 && *in < 0x80 && *in != '"' && *in != '\\') {
+                in++;
+                continue;
+            }
+            if (utf8) {
+                // valid continuation bytes and not overlong/surrogate/>U+10FFFF
+                if ((*in & 0xf8) == 0xf0 && (in[1] & 0xc0) == 0x80 && (in[2] & 0xc0) == 0x80 && (in[3] & 0xc0) == 0x80 &&
+                    *in <= 0xf4 && !(*in == 0xf0 && in[1] < 0x90) && !(*in == 0xf4 && in[1] > 0x8f)) {
+                    in += 4;
+                    continue;
+                }
+                if ((*in & 0xf0) == 0xe0 && (in[1] & 0xc0) == 0x80 && (in[2] & 0xc0) == 0x80 &&
+                    !(*in == 0xe0 && in[1] < 0xa0) && !(*in == 0xed && in[1] > 0x9f)) {
+                    in += 3;
+                    continue;
+                }
+                if ((*in & 0xe0) == 0xc0 && *in >= 0xc2 && (in[1] & 0xc0) == 0x80) {
+                    in += 2;
+                    continue;
+                }
+            }
+            break;
+        }
+        if (in > start)
+            BSB_EXPORT_ptr(*bsb, start, in - start);
+        if (!*in)
+            break;
+
         switch (*in) {
         case '\b':
             BSB_EXPORT_cstr(*bsb, "\\b");
@@ -184,42 +212,19 @@ void arkime_db_js0n_str(BSB *bsb, uint8_t *in, gboolean utf8)
         case '\\':
             BSB_EXPORT_cstr(*bsb, "\\\\");
             break;
-        case '/':
-            BSB_EXPORT_cstr(*bsb, "\\/");
-            break;
         default:
             if (*in < 32) {
                 BSB_EXPORT_sprintf(*bsb, "\\u%04x", *in);
-            } else if (utf8) {
-                if ((*in & 0xf8) == 0xf0) {
-                    if (!in[1] || !in[2] || !in[3]) goto end;
-                    BSB_EXPORT_ptr(*bsb, in, 4);
-                    in += 3;
-                } else if ((*in & 0xf0) == 0xe0) {
-                    if (!in[1] || !in[2]) goto end;
-                    BSB_EXPORT_ptr(*bsb, in, 3);
-                    in += 2;
-                } else if ((*in & 0xe0) == 0xc0) {
-                    if (!in[1]) goto end;
-                    BSB_EXPORT_ptr(*bsb, in, 2);
-                    in += 1;
-                } else {
-                    BSB_EXPORT_u08(*bsb, *in);
-                }
             } else {
-                if (*in & 0x80) {
-                    BSB_EXPORT_u08(*bsb, (0xc0 | (*in >> 6)));
-                    BSB_EXPORT_u08(*bsb, (0x80 | (*in & 0x3f)));
-                } else {
-                    BSB_EXPORT_u08(*bsb, *in);
-                }
+                // invalid or non-utf8 high byte: latin1 -> utf8
+                BSB_EXPORT_u08(*bsb, (0xc0 | (*in >> 6)));
+                BSB_EXPORT_u08(*bsb, (0x80 | (*in & 0x3f)));
             }
             break;
         }
         in++;
     }
 
-end:
     BSB_EXPORT_u08(*bsb, '"');
 }
 
@@ -233,6 +238,37 @@ void arkime_db_js0n_str_unquoted(BSB *bsb, uint8_t *in, int len, gboolean utf8)
     const uint8_t *end = in + len;
 
     while (in < end) {
+        // batch a run of bytes that pass through unchanged
+        const uint8_t *start = in;
+        while (in < end) {
+            if (*in >= 0x20 && *in < 0x80 && *in != '"' && *in != '\\') {
+                in++;
+                continue;
+            }
+            if (utf8) {
+                // valid continuation bytes and not overlong/surrogate/>U+10FFFF
+                if ((*in & 0xf8) == 0xf0 && in + 3 < end && (in[1] & 0xc0) == 0x80 && (in[2] & 0xc0) == 0x80 && (in[3] & 0xc0) == 0x80 &&
+                    *in <= 0xf4 && !(*in == 0xf0 && in[1] < 0x90) && !(*in == 0xf4 && in[1] > 0x8f)) {
+                    in += 4;
+                    continue;
+                }
+                if ((*in & 0xf0) == 0xe0 && in + 2 < end && (in[1] & 0xc0) == 0x80 && (in[2] & 0xc0) == 0x80 &&
+                    !(*in == 0xe0 && in[1] < 0xa0) && !(*in == 0xed && in[1] > 0x9f)) {
+                    in += 3;
+                    continue;
+                }
+                if ((*in & 0xe0) == 0xc0 && *in >= 0xc2 && in + 1 < end && (in[1] & 0xc0) == 0x80) {
+                    in += 2;
+                    continue;
+                }
+            }
+            break;
+        }
+        if (in > start)
+            BSB_EXPORT_ptr(*bsb, start, in - start);
+        if (in >= end)
+            break;
+
         switch (*in) {
         case '\b':
             BSB_EXPORT_cstr(*bsb, "\\b");
@@ -255,35 +291,13 @@ void arkime_db_js0n_str_unquoted(BSB *bsb, uint8_t *in, int len, gboolean utf8)
         case '\\':
             BSB_EXPORT_cstr(*bsb, "\\\\");
             break;
-        case '/':
-            BSB_EXPORT_cstr(*bsb, "\\/");
-            break;
         default:
             if (*in < 32) {
                 BSB_EXPORT_sprintf(*bsb, "\\u%04x", *in);
-            } else if (utf8) {
-                if ((*in & 0xf8) == 0xf0) {
-                    if (in + 3 >= end) return;
-                    BSB_EXPORT_ptr(*bsb, in, 4);
-                    in += 3;
-                } else if ((*in & 0xf0) == 0xe0) {
-                    if (in + 2 >= end) return;
-                    BSB_EXPORT_ptr(*bsb, in, 3);
-                    in += 2;
-                } else if ((*in & 0xe0) == 0xc0) {
-                    if (in + 1 >= end) return;
-                    BSB_EXPORT_ptr(*bsb, in, 2);
-                    in += 1;
-                } else {
-                    BSB_EXPORT_u08(*bsb, *in);
-                }
             } else {
-                if (*in & 0x80) {
-                    BSB_EXPORT_u08(*bsb, (0xc0 | (*in >> 6)));
-                    BSB_EXPORT_u08(*bsb, (0x80 | (*in & 0x3f)));
-                } else {
-                    BSB_EXPORT_u08(*bsb, *in);
-                }
+                // invalid or non-utf8 high byte: latin1 -> utf8
+                BSB_EXPORT_u08(*bsb, (0xc0 | (*in >> 6)));
+                BSB_EXPORT_u08(*bsb, (0x80 | (*in & 0x3f)));
             }
             break;
         }
@@ -438,57 +452,56 @@ void arkime_db_set_send_bulk2(ArkimeDbSendBulkFunc func, gboolean bulkHeader, gb
 /******************************************************************************/
 gchar *arkime_db_community_id(const ArkimeSession_t *session)
 {
-    GChecksum *const checksum = arkimeThreadData[session->thread].checksum1;
+    SHA_CTX checksum;
+    SHA1_Init(&checksum);
 
     static uint16_t seed = 0;
     static uint8_t  zero = 0;
 
-    g_checksum_update(checksum, (guchar *)&seed, 2);
+    SHA1_Update(&checksum, &seed, 2);
 
     // SessionId layout: [len:1][vlan/vni:3][addr1][addr2][port1:2][port2:2]
     // IPv4: addr at +4 and +8 (4 bytes each), ports at +12 and +14
     // IPv6: addr at +4 and +20 (16 bytes each), ports at +36 and +38
     if (ARKIME_SESSION_IS_v6(session)) {
         // For v6 we sort the same as community id
-        g_checksum_update(checksum, (guchar *)session->sessionId + 4, 32);
-        g_checksum_update(checksum, (guchar *)&session->ipProtocol, 1);
-        g_checksum_update(checksum, (guchar *)&zero, 1);
-        g_checksum_update(checksum, (guchar *)session->sessionId + 36, 4);
+        SHA1_Update(&checksum, session->sessionId + 4, 32);
+        SHA1_Update(&checksum, &session->ipProtocol, 1);
+        SHA1_Update(&checksum, &zero, 1);
+        SHA1_Update(&checksum, session->sessionId + 36, 4);
     } else {
         // For v4 because of byte order we have a different sort for ip but not port
         int cmp = memcmp(session->sessionId + 4, session->sessionId + 8, 4);
 
         if (cmp <= 0) {
-            g_checksum_update(checksum, (guchar *)session->sessionId + 4, 8);
-            g_checksum_update(checksum, (guchar *)&session->ipProtocol, 1);
-            g_checksum_update(checksum, (guchar *)&zero, 1);
-            g_checksum_update(checksum, (guchar *)session->sessionId + 12, 4);
+            SHA1_Update(&checksum, session->sessionId + 4, 8);
+            SHA1_Update(&checksum, &session->ipProtocol, 1);
+            SHA1_Update(&checksum, &zero, 1);
+            SHA1_Update(&checksum, session->sessionId + 12, 4);
         }  else {
-            g_checksum_update(checksum, (guchar *)session->sessionId + 8, 4);
-            g_checksum_update(checksum, (guchar *)session->sessionId + 4, 4);
-            g_checksum_update(checksum, (guchar *)&session->ipProtocol, 1);
-            g_checksum_update(checksum, (guchar *)&zero, 1);
-            g_checksum_update(checksum, (guchar *)session->sessionId + 14, 2);
-            g_checksum_update(checksum, (guchar *)session->sessionId + 12, 2);
+            SHA1_Update(&checksum, session->sessionId + 8, 4);
+            SHA1_Update(&checksum, session->sessionId + 4, 4);
+            SHA1_Update(&checksum, &session->ipProtocol, 1);
+            SHA1_Update(&checksum, &zero, 1);
+            SHA1_Update(&checksum, session->sessionId + 14, 2);
+            SHA1_Update(&checksum, session->sessionId + 12, 2);
         }
     }
 
-    guint8 digest[100];
-    gsize  digest_len = 100;
+    uint8_t digest[SHA_DIGEST_LENGTH];
 
-    g_checksum_get_digest(checksum, digest, &digest_len);
-    gchar *b64 = g_base64_encode(digest, digest_len);
-
-    g_checksum_reset(checksum);
-    return b64;
+    SHA1_Final(digest, &checksum);
+    return g_base64_encode(digest, sizeof(digest));
 }
 /******************************************************************************/
 // ICMP is a special case, we need to handle it differently
 // It remaps the ports and is kind of a hot mess.
 gchar *arkime_db_community_id_icmp(const ArkimeSession_t *session)
 {
-    GChecksum *const checksum = arkimeThreadData[session->thread].checksum1;
-    int              cmp;
+    SHA_CTX checksum;
+    int     cmp;
+
+    SHA1_Init(&checksum);
 
     static uint16_t seed = 0;
     static uint8_t  zero = 0;
@@ -496,7 +509,7 @@ gchar *arkime_db_community_id_icmp(const ArkimeSession_t *session)
     uint16_t port1;
     uint16_t port2;
 
-    g_checksum_update(checksum, (guchar *)&seed, 2);
+    SHA1_Update(&checksum, &seed, 2);
 
     port1 = session->icmpInfo[0];
     port2 = session->icmpInfo[1];
@@ -514,21 +527,21 @@ gchar *arkime_db_community_id_icmp(const ArkimeSession_t *session)
         if (cmp < 0 || (cmp == 0 && port1 <= port2)) {
             port1 = htons(port1);
             port2 = htons(port2);
-            g_checksum_update(checksum, (guchar *)session->addr1.s6_addr, 16);
-            g_checksum_update(checksum, (guchar *)session->addr2.s6_addr, 16);
-            g_checksum_update(checksum, (guchar *)&session->ipProtocol, 1);
-            g_checksum_update(checksum, (guchar *)&zero, 1);
-            g_checksum_update(checksum, (guchar *)&port1, 2);
-            g_checksum_update(checksum, (guchar *)&port2, 2);
+            SHA1_Update(&checksum, session->addr1.s6_addr, 16);
+            SHA1_Update(&checksum, session->addr2.s6_addr, 16);
+            SHA1_Update(&checksum, &session->ipProtocol, 1);
+            SHA1_Update(&checksum, &zero, 1);
+            SHA1_Update(&checksum, &port1, 2);
+            SHA1_Update(&checksum, &port2, 2);
         } else {
             port1 = htons(port1);
             port2 = htons(port2);
-            g_checksum_update(checksum, (guchar *)session->addr2.s6_addr, 16);
-            g_checksum_update(checksum, (guchar *)session->addr1.s6_addr, 16);
-            g_checksum_update(checksum, (guchar *)&session->ipProtocol, 1);
-            g_checksum_update(checksum, (guchar *)&zero, 1);
-            g_checksum_update(checksum, (guchar *)&port2, 2);
-            g_checksum_update(checksum, (guchar *)&port1, 2);
+            SHA1_Update(&checksum, session->addr2.s6_addr, 16);
+            SHA1_Update(&checksum, session->addr1.s6_addr, 16);
+            SHA1_Update(&checksum, &session->ipProtocol, 1);
+            SHA1_Update(&checksum, &zero, 1);
+            SHA1_Update(&checksum, &port2, 2);
+            SHA1_Update(&checksum, &port1, 2);
         }
     } else {
         static const uint8_t port2Mapping[19] = {8, 255, 255, 255, 255, 255, 255, 255, 0, 10,
@@ -543,32 +556,28 @@ gchar *arkime_db_community_id_icmp(const ArkimeSession_t *session)
         if (cmp < 0 || (cmp == 0 && port1 < port2)) {
             port1 = htons(port1);
             port2 = htons(port2);
-            g_checksum_update(checksum, (guchar *)session->addr1.s6_addr + 12, 4);
-            g_checksum_update(checksum, (guchar *)session->addr2.s6_addr + 12, 4);
-            g_checksum_update(checksum, (guchar *)&session->ipProtocol, 1);
-            g_checksum_update(checksum, (guchar *)&zero, 1);
-            g_checksum_update(checksum, (guchar *)&port1, 2);
-            g_checksum_update(checksum, (guchar *)&port2, 2);
+            SHA1_Update(&checksum, session->addr1.s6_addr + 12, 4);
+            SHA1_Update(&checksum, session->addr2.s6_addr + 12, 4);
+            SHA1_Update(&checksum, &session->ipProtocol, 1);
+            SHA1_Update(&checksum, &zero, 1);
+            SHA1_Update(&checksum, &port1, 2);
+            SHA1_Update(&checksum, &port2, 2);
         }  else {
             port1 = htons(port1);
             port2 = htons(port2);
-            g_checksum_update(checksum, (guchar *)session->addr2.s6_addr + 12, 4);
-            g_checksum_update(checksum, (guchar *)session->addr1.s6_addr + 12, 4);
-            g_checksum_update(checksum, (guchar *)&session->ipProtocol, 1);
-            g_checksum_update(checksum, (guchar *)&zero, 1);
-            g_checksum_update(checksum, (guchar *)&port2, 2);
-            g_checksum_update(checksum, (guchar *)&port1, 2);
+            SHA1_Update(&checksum, session->addr2.s6_addr + 12, 4);
+            SHA1_Update(&checksum, session->addr1.s6_addr + 12, 4);
+            SHA1_Update(&checksum, &session->ipProtocol, 1);
+            SHA1_Update(&checksum, &zero, 1);
+            SHA1_Update(&checksum, &port2, 2);
+            SHA1_Update(&checksum, &port1, 2);
         }
     }
 
-    guint8 digest[100];
-    gsize  digest_len = 100;
+    uint8_t digest[SHA_DIGEST_LENGTH];
 
-    g_checksum_get_digest(checksum, digest, &digest_len);
-    gchar *b64 = g_base64_encode(digest, digest_len);
-
-    g_checksum_reset(checksum);
-    return b64;
+    SHA1_Final(digest, &checksum);
+    return g_base64_encode(digest, sizeof(digest));
 }
 /******************************************************************************/
 typedef struct {
@@ -604,18 +613,29 @@ do { \
     } \
     BSB_EXPORT_rewind(jbsb, 1); /* Remove last comma */ \
     BSB_EXPORT_cstr(jbsb, "],"); \
-} while(0)
+} while (0)
 
 LOCAL int arkime_db_field_sort(const void *a, const void *b)
 {
     return strcmp(config.fields[*(short *)a]->dbFieldFull, config.fields[*(short *)b]->dbFieldFull);
 }
 
+/******************************************************************************/
+/* State for autoGenerateId=sequential. uuid_generate is locked, so calling it
+ * per session serializes the packet threads; instead each thread draws one
+ * random uuid at startup and increments it per session. The high bytes, which
+ * the counter never reaches, are overwritten with the node name hash and the
+ * packet thread so two captures (even a fleet booting together with a cold RNG)
+ * and two threads on one capture cannot collide without relying on the random
+ * bits; the low bytes stay random + counter for uniqueness across restarts.
+ */
+LOCAL __thread uuid_t   idCur;
+LOCAL __thread gboolean idInit;
+/******************************************************************************/
 void arkime_db_save_session(ArkimeSession_t *session, int final)
 {
     char                   id[120];
     uint32_t               id_len;
-    uuid_t                 uuid;
     ArkimeString_t        *hstring;
     ArkimeInt_t           *hint;
     ArkimeStringHashStd_t *shash;
@@ -664,7 +684,7 @@ void arkime_db_save_session(ArkimeSession_t *session, int final)
         }
     }
 
-    ARKIME_THREAD_INCR(totalSessions);
+    ARKIME_THREAD_INCR(arkimeCounters.totalSessions);
     session->segments++;
 
     const int thread = session->thread;
@@ -700,7 +720,7 @@ void arkime_db_save_session(ArkimeSession_t *session, int final)
             break;
         case ARKIME_ROTATE_HOURLY6:
             snprintf(dbInfo[thread].prefix, sizeof(dbInfo[thread].prefix), "%02d%02d%02dh%02d", tmp.tm_year % 100, tmp.tm_mon + 1, tmp.tm_mday, (tmp.tm_hour / 6) * 6);
-            break ;
+            break;
         case ARKIME_ROTATE_HOURLY8:
             snprintf(dbInfo[thread].prefix, sizeof(dbInfo[thread].prefix), "%02d%02d%02dh%02d", tmp.tm_year % 100, tmp.tm_mon + 1, tmp.tm_mday, (tmp.tm_hour / 8) * 8);
             break;
@@ -727,12 +747,31 @@ void arkime_db_save_session(ArkimeSession_t *session, int final)
         if (session->rootId == GINT_TO_POINTER(1))
             session->rootId = g_strdup(id);
     } else if (config.autoGenerateId != 1 || session->rootId == GINT_TO_POINTER(1)) {
-        id_len = arkime_snprintf_len(id, sizeof(id), "%s-", dbInfo[thread].prefix);
+        uuid_t uuid;
+        const uint8_t *idBytes;
 
-        uuid_generate(uuid);
+        if (config.autoGenerateId == 3) {
+            // sequential: per thread, lock free -- see idCur comment above
+            if (unlikely(!idInit)) {
+                uuid_generate(idCur);
+                uint32_t nodeHash = arkime_string_hash(config.nodeName);
+                memcpy(idCur, &nodeHash, 4);  // high bytes: node identity ...
+                idCur[4] = (uint8_t)thread;   // ... then packet thread
+                idInit = TRUE;
+            } else {
+                for (int i = 15; i >= 0 && ++idCur[i] == 0; i--) // increment, carry toward high bytes
+                    ;
+            }
+            idBytes = idCur;
+        } else {
+            uuid_generate(uuid); // a fresh random uuid per session
+            idBytes = uuid;
+        }
+
+        id_len = arkime_snprintf_len(id, sizeof(id), "%s-", dbInfo[thread].prefix);
         gint state = 0, save = 0;
         id_len += g_base64_encode_step((guchar *)&myPid, 2, FALSE, id + id_len, &state, &save);
-        id_len += g_base64_encode_step(uuid, sizeof(uuid_t), FALSE, id + id_len, &state, &save);
+        id_len += g_base64_encode_step(idBytes, sizeof(uuid_t), FALSE, id + id_len, &state, &save);
         id_len += g_base64_encode_close(FALSE, id + id_len, &state, &save);
         id[id_len] = 0;
 
@@ -1233,8 +1272,8 @@ void arkime_db_save_session(ArkimeSession_t *session, int final)
                 BSB_EXPORT_sprintf(jbsb, "\"%sCnt\":%u,", fieldInfo->dbField, g_hash_table_size(ghash));
             }
             BSB_EXPORT_sprintf(jbsb, "\"%s\":[", fieldInfo->dbField);
-            g_hash_table_iter_init (&iter, ghash);
-            while (g_hash_table_iter_next (&iter, &ikey, NULL)) {
+            g_hash_table_iter_init(&iter, ghash);
+            while (g_hash_table_iter_next(&iter, &ikey, NULL)) {
                 arkime_db_js0n_str(&jbsb, ikey, flags & ARKIME_FIELD_FLAG_FORCE_UTF8);
                 BSB_EXPORT_u08(jbsb, ',');
             }
@@ -1270,8 +1309,8 @@ void arkime_db_save_session(ArkimeSession_t *session, int final)
                 BSB_EXPORT_sprintf(jbsb, "\"%sCnt\":%u,", fieldInfo->dbField, g_hash_table_size(ghash));
             }
             BSB_EXPORT_sprintf(jbsb, "\"%s\":[", fieldInfo->dbField);
-            g_hash_table_iter_init (&iter, ghash);
-            while (g_hash_table_iter_next (&iter, &ikey, NULL)) {
+            g_hash_table_iter_init(&iter, ghash);
+            while (g_hash_table_iter_next(&iter, &ikey, NULL)) {
                 BSB_EXPORT_sprintf(jbsb, "%u", (unsigned int)(long)ikey);
                 BSB_EXPORT_u08(jbsb, ',');
             }
@@ -1303,8 +1342,8 @@ void arkime_db_save_session(ArkimeSession_t *session, int final)
                 BSB_EXPORT_sprintf(jbsb, "\"%sCnt\":%u,", fieldInfo->dbField, g_hash_table_size(ghash));
             }
             BSB_EXPORT_sprintf(jbsb, "\"%s\":[", fieldInfo->dbField);
-            g_hash_table_iter_init (&iter, ghash);
-            while (g_hash_table_iter_next (&iter, &ikey, NULL)) {
+            g_hash_table_iter_init(&iter, ghash);
+            while (g_hash_table_iter_next(&iter, &ikey, NULL)) {
                 BSB_EXPORT_sprintf(jbsb, "%f", POINTER_TO_FLOAT(ikey));
                 BSB_EXPORT_u08(jbsb, ',');
             }
@@ -1364,8 +1403,8 @@ void arkime_db_save_session(ArkimeSession_t *session, int final)
             uint32_t              cnt = 0;
 
             BSB_EXPORT_sprintf(jbsb, "\"%s\":[", fieldInfo->dbField);
-            g_hash_table_iter_init (&iter, ghash);
-            while (cnt < MAX_IPS && g_hash_table_iter_next (&iter, &ikey, NULL)) {
+            g_hash_table_iter_init(&iter, ghash);
+            while (cnt < MAX_IPS && g_hash_table_iter_next(&iter, &ikey, NULL)) {
                 arkime_db_geo_lookup6(session, *(struct in6_addr *)ikey, &geos[cnt]);
 
                 if (IN6_IS_ADDR_V4MAPPED((struct in6_addr *)ikey)) {
@@ -1465,7 +1504,7 @@ void arkime_db_save_session(ArkimeSession_t *session, int final)
         goto cleanup;
     }
 
-    ARKIME_THREAD_INCR_NUM(totalSessionBytes, (int)(BSB_WORK_PTR(jbsb) - dataPtr));
+    ARKIME_THREAD_INCR_NUM(arkimeCounters.totalSessionBytes, (int)(BSB_WORK_PTR(jbsb) - dataPtr));
 
     if (config.dryRun) {
         if (config.tests) {
@@ -1490,7 +1529,7 @@ void arkime_db_save_session(ArkimeSession_t *session, int final)
     }
 
     if (jsonSize < (uint32_t)(BSB_WORK_PTR(jbsb) - startPtr)) {
-        LOG("WARNING - %s BIGGER than expected json %u %d\n", id, jsonSize,  (int)(BSB_WORK_PTR(jbsb) - startPtr));
+        LOG("WARNING - %s BIGGER than expected json %u %d\n", id, jsonSize, (int)(BSB_WORK_PTR(jbsb) - startPtr));
         if (config.debug)
             LOG("Data:\n%.*s\n", (int)(BSB_WORK_PTR(jbsb) - startPtr), startPtr);
     }
@@ -1616,7 +1655,7 @@ void arkime_db_memory_info(int refresh, uint64_t *memBytes, float *memPercent)
         mem = arkime_db_memory_size();
     }
     if (memPercent) {
-        double memMax = (uint64_t)sysconf (_SC_PHYS_PAGES) * (uint64_t)sysconf (_SC_PAGESIZE);
+        double memMax = (uint64_t)sysconf(_SC_PHYS_PAGES) * (uint64_t)sysconf(_SC_PAGESIZE);
         *memPercent = mem / memMax * 100.0;
     }
     if (memBytes)
@@ -1699,7 +1738,7 @@ LOCAL void arkime_db_update_stats(int n, gboolean sync)
     uint64_t overloadDropped = arkime_packet_dropped_overload();
     uint64_t totalDropped    = arkime_packet_dropped_packets();
     uint64_t fragsDropped    = arkime_packet_dropped_frags();
-    uint64_t dupDropped      = packetStats[ARKIME_PACKET_DUPLICATE_DROPPED];
+    uint64_t dupDropped      = arkimeCounters.packetStats[ARKIME_PACKET_DUPLICATE_DROPPED];
     uint64_t esDropped       = arkime_http_dropped_count(esServer);
     uint64_t totalBytes      = arkime_packet_total_bytes();
     uint64_t writtenBytes    = arkime_packet_written_bytes();
@@ -1744,8 +1783,8 @@ LOCAL void arkime_db_update_stats(int n, gboolean sync)
     uint64_t diffusage = (usage.ru_utime.tv_sec - lastUsage[n].ru_utime.tv_sec) * 1000 + ((int64_t)usage.ru_utime.tv_usec - (int64_t)lastUsage[n].ru_utime.tv_usec) / 1000 +
                          (usage.ru_stime.tv_sec - lastUsage[n].ru_stime.tv_sec) * 1000 + ((int64_t)usage.ru_stime.tv_usec - (int64_t)lastUsage[n].ru_stime.tv_usec) / 1000;
 
-    dbTotalPackets[n] += (totalPackets - lastPackets[n]);
-    dbTotalSessions[n] += (totalSessions - lastSessions[n]);
+    dbTotalPackets[n] += (arkimeCounters.totalPackets - lastPackets[n]);
+    dbTotalSessions[n] += (arkimeCounters.totalSessions - lastSessions[n]);
     dbTotalDropped[n] += (totalDropped - lastDropped[n]);
     dbTotalK[n] += (totalBytes - lastBytes[n]) / 1000;
 
@@ -1838,12 +1877,12 @@ LOCAL void arkime_db_update_stats(int n, gboolean sync)
                                        arkime_session_watch_count(SESSION_SCTP),
                                        arkime_session_watch_count(SESSION_ESP),
                                        arkime_session_watch_count(SESSION_OTHER),
-                                       (totalPackets - lastPackets[n]),
+                                       (arkimeCounters.totalPackets - lastPackets[n]),
                                        (totalBytes - lastBytes[n]),
                                        (writtenBytes - lastWrittenBytes[n]),
                                        (unwrittenBytes - lastUnwrittenBytes[n]),
-                                       (totalSessions - lastSessions[n]),
-                                       (totalSessionBytes - lastSessionBytes[n]),
+                                       (arkimeCounters.totalSessions - lastSessions[n]),
+                                       (arkimeCounters.totalSessionBytes - lastSessionBytes[n]),
                                        (totalDropped - lastDropped[n]),
                                        (fragsDropped - lastFragsDropped[n]),
                                        (overloadDropped - lastOverloadDropped[n]),
@@ -1857,9 +1896,9 @@ LOCAL void arkime_db_update_stats(int n, gboolean sync)
     lastBytes[n]           = totalBytes;
     lastWrittenBytes[n]    = writtenBytes;
     lastUnwrittenBytes[n]  = unwrittenBytes;
-    lastPackets[n]         = totalPackets;
-    lastSessions[n]        = totalSessions;
-    lastSessionBytes[n]    = totalSessionBytes;
+    lastPackets[n]         = arkimeCounters.totalPackets;
+    lastSessions[n]        = arkimeCounters.totalSessions;
+    lastSessionBytes[n]    = arkimeCounters.totalSessionBytes;
     lastDropped[n]         = totalDropped;
     lastFragsDropped[n]    = fragsDropped;
     lastOverloadDropped[n] = overloadDropped;
@@ -1898,7 +1937,7 @@ LOCAL void arkime_db_update_stats(int n, gboolean sync)
 }
 /******************************************************************************/
 // Runs on main thread
-LOCAL gboolean arkime_db_flush_gfunc (gpointer user_data)
+LOCAL gboolean arkime_db_flush_gfunc(gpointer user_data)
 {
     struct timeval  currentTime;
 
@@ -1957,7 +1996,7 @@ LOCAL void arkime_db_health_check_cb(int code, uint8_t *data, int data_len, gpoi
 /******************************************************************************/
 
 // Runs on main thread
-LOCAL gboolean arkime_db_health_check (gpointer user_data)
+LOCAL gboolean arkime_db_health_check(gpointer user_data)
 {
     arkime_http_schedule(esServer, "GET", "/_cat/health?format=json", -1, NULL, 0, NULL, ARKIME_HTTP_PRIORITY_DROPABLE, arkime_db_health_check_cb, user_data);
     clock_gettime(CLOCK_MONOTONIC, &startHealthCheck);
@@ -2546,7 +2585,7 @@ void arkime_db_oui_lookup(int field, ArkimeSession_t *session, const uint8_t *ma
     if (!ouiTree)
         return;
 
-    if ((node = patricia_search_best3 (ouiTree, mac, 48)) == NULL)
+    if ((node = patricia_search_best3(ouiTree, mac, 48)) == NULL)
         return;
 
     arkime_field_string_add(field, session, node->data, -1, TRUE);
@@ -2587,7 +2626,8 @@ LOCAL void arkime_db_load_fields()
 
     uint32_t out[2 * 8000];
     memset(out, 0, sizeof(out));
-    js0n(ahits, ahits_len, out, sizeof(out));
+    if (js0n(ahits, ahits_len, out, sizeof(out)) != 0)
+        LOG("WARNING - Couldn't parse all of the %sfields response, some fields may be missing", config.prefix);
     for (int i = 0; out[i]; i += 2) {
         uint32_t           id_len;
         const uint8_t     *id = 0;
@@ -2969,12 +3009,16 @@ void arkime_db_init()
     for (int thread = 0; thread < config.packetThreads; thread++) {
         ARKIME_LOCK_INIT(dbInfo[thread].lock);
         dbInfo[thread].prefixTime = -1;
-        arkimeThreadData[thread].checksum1 = g_checksum_new(G_CHECKSUM_SHA1);
-        arkimeThreadData[thread].checksum256 = g_checksum_new(G_CHECKSUM_SHA256);
-
     }
 
     arkime_session_save_func = arkime_parsers_get_named_func("arkime_session_save");
+
+    arkime_field_define("general", "seconds",
+                        "dbTimestamp", "DB Timestamp", "@timestamp",
+                        "Timestamp when the session was written to the database",
+                        0, ARKIME_FIELD_FLAG_FAKE,
+                        "type2", "date",
+                        (char *)NULL);
 
     numRegex = g_regex_new("#NUM#", 0, 0, 0);
     numHexRegex = g_regex_new("#NUMHEX#", 0, 0, 0);
@@ -3034,15 +3078,15 @@ void arkime_db_exit()
 
     if (config.debug) {
         LOG("totalPackets: %" PRIu64 " totalSessions: %" PRIu64 " writtenBytes: %" PRIu64 " unwrittenBytes: %" PRIu64 " pstats: %" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64,
-            totalPackets, totalSessions, arkime_packet_written_bytes(), arkime_packet_unwritten_bytes(),
-            packetStats[ARKIME_PACKET_DO_PROCESS],
-            packetStats[ARKIME_PACKET_IP_DROPPED],
-            packetStats[ARKIME_PACKET_OVERLOAD_DROPPED],
-            packetStats[ARKIME_PACKET_CORRUPT],
-            packetStats[ARKIME_PACKET_UNKNOWN_ETHER],
-            packetStats[ARKIME_PACKET_UNKNOWN_IP],
-            packetStats[ARKIME_PACKET_IPPORT_DROPPED],
-            packetStats[ARKIME_PACKET_DUPLICATE_DROPPED]
+            arkimeCounters.totalPackets, arkimeCounters.totalSessions, arkime_packet_written_bytes(), arkime_packet_unwritten_bytes(),
+            arkimeCounters.packetStats[ARKIME_PACKET_DO_PROCESS],
+            arkimeCounters.packetStats[ARKIME_PACKET_IP_DROPPED],
+            arkimeCounters.packetStats[ARKIME_PACKET_OVERLOAD_DROPPED],
+            arkimeCounters.packetStats[ARKIME_PACKET_CORRUPT],
+            arkimeCounters.packetStats[ARKIME_PACKET_UNKNOWN_ETHER],
+            arkimeCounters.packetStats[ARKIME_PACKET_UNKNOWN_IP],
+            arkimeCounters.packetStats[ARKIME_PACKET_IPPORT_DROPPED],
+            arkimeCounters.packetStats[ARKIME_PACKET_DUPLICATE_DROPPED]
            );
     }
 }

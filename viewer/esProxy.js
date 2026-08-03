@@ -203,21 +203,31 @@ app.use((req, res, next) => {
     return res.set('WWW-Authenticate', 'Basic').status(401).send();
   }
 
-  if (!sensors[credentials.name]) {
-    console.log(`Unknown sensor ${credentials.name}`);
+  // Own properties only. The name is whatever the client put in Basic auth, and
+  // a plain [] lookup with __proto__ or constructor returns something truthy off
+  // Object.prototype that has no pass and no ip -- authenticating a sensor that
+  // was never configured. configMap now hands back a null prototype map too.
+  // isPP is the codebase's usual guard but is not sufficient on its own here:
+  // toString, valueOf and hasOwnProperty are not on its list yet resolve just
+  // the same, which is what the own property check covers.
+  const sensor = !ArkimeUtil.isPP(credentials.name) && Object.hasOwn(sensors, credentials.name)
+    ? sensors[credentials.name]
+    : undefined;
+  if (!sensor) {
+    console.log(`Unknown sensor ${ArkimeUtil.sanitizeStr(credentials.name)}`);
     return res.set('WWW-Authenticate', 'Basic').status(401).send();
   }
 
-  if (sensors[credentials.name].pass !== undefined &&
+  if (sensor.pass !== undefined &&
       !cryptoLib.timingSafeEqual(
-        cryptoLib.createHmac('sha256', 'compare').update(sensors[credentials.name].pass).digest(),
+        cryptoLib.createHmac('sha256', 'compare').update(sensor.pass).digest(),
         cryptoLib.createHmac('sha256', 'compare').update(credentials.pass).digest())) {
-    console.log(`Incorrect password for ${credentials.name}`);
+    console.log(`Incorrect password for ${ArkimeUtil.sanitizeStr(credentials.name)}`);
     return res.set('WWW-Authenticate', 'Basic').status(401).send();
   }
 
-  req.sensor = sensors[credentials.name];
-  if (!sensors[credentials.name].ip) {
+  req.sensor = sensor;
+  if (!sensor.ip) {
     return next();
   }
 
@@ -490,6 +500,19 @@ function validateSearchIds (req) {
     return false;
   }
 }
+// getEntirePCAP looks up every session sharing a rootId
+const searchRootIdKeys = ['size', '_source', 'sort', 'query', 'profile'];
+function validateSearchRootId (req) {
+  try {
+    const json = JSON.parse(req.body.toString('utf8'));
+    return Object.keys(json).every(key => searchRootIdKeys.includes(key)) &&
+      Object.keys(json.query).length === 1 &&
+      Object.keys(json.query.term).length === 1 &&
+      ArkimeUtil.isString(json.query.term.rootId);
+  } catch (e) {
+    return false;
+  }
+}
 function validateUpdate (req) {
   try {
     const json = JSON.parse(req.body.toString('utf8'));
@@ -513,7 +536,7 @@ app.post('*', saveBody, (req, res) => {
   } else if (path.startsWith(`/${prefix}files/_doc/${req.sensor.node}`)) {
   } else if (path.startsWith('/_bulk') && validateBulk(req)) {
   } else if (path.startsWith(`/${prefix}files/_search`) && validateFilesSearch(req)) {
-  } else if ((path.startsWith(`/${oldprefix}sessions2`) || path.startsWith(`/${prefix}sessions3`)) && path.endsWith('/_search') && validateSearchIds(req)) {
+  } else if ((path.startsWith(`/${oldprefix}sessions2`) || path.startsWith(`/${prefix}sessions3`)) && path.endsWith('/_search') && (validateSearchIds(req) || validateSearchRootId(req))) {
   } else if (path.match(/^\/[^/]*history_v[^/]*\/_doc$/)) {
   } else if (path.match(/^\/[^/]*sessions[23]-[^/]+\/_update\/[^/]+$/) && validateUpdate(req)) {
     console.log(`UPDATE : ${req.sensor.node} path:>%s<:`, ArkimeUtil.sanitizeStr(path));

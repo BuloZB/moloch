@@ -6,6 +6,9 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 
+#define OPENSSL_SUPPRESS_DEPRECATED
+#include <openssl/md5.h>
+
 //#define EMAILDEBUG
 
 #define SMTP_MAX_LINE_LEN 10000
@@ -50,7 +53,8 @@ typedef struct {
     gint               state64[2];
     guint              save64[2];
     guint              bdatRemaining[2];
-    GChecksum         *checksum[4];
+    MD5_CTX            md5Ctx[2];
+    GChecksum         *sha256[2];
 
     uint16_t           base64Decode: 2;
     uint16_t           firstInContent: 2;
@@ -88,7 +92,7 @@ enum {
 /******************************************************************************/
 LOCAL char *smtp_remove_matching(char *str, char start, char stop)
 {
-    while (isspace(*str))
+    while (isspace((uint8_t) *str))
         str++;
 
     if (*str == start)
@@ -108,7 +112,7 @@ LOCAL char *smtp_remove_matching(char *str, char start, char stop)
 // value in place and returns a pointer to its start.
 LOCAL char *smtp_parse_param_value(char *str)
 {
-    while (isspace(*str))
+    while (isspace((uint8_t) *str))
         str++;
 
     if (*str == '"') {
@@ -121,7 +125,7 @@ LOCAL char *smtp_parse_param_value(char *str)
     }
 
     char *startstr = str;
-    while (*str && *str != ';' && !isspace(*str))
+    while (*str && *str != ';' && !isspace((uint8_t) *str))
         str++;
     *str = 0;
 
@@ -130,7 +134,7 @@ LOCAL char *smtp_parse_param_value(char *str)
 /******************************************************************************/
 LOCAL void smtp_email_add_value(ArkimeSession_t *session, int pos, const char *s, int l)
 {
-    while (l > 0 && isspace(*s)) {
+    while (l > 0 && isspace((uint8_t) *s)) {
         s++;
         l--;
     }
@@ -382,7 +386,7 @@ LOCAL void smtp_parse_email_addresses(int field, ArkimeSession_t *session, char 
     const char *end = data + len;
 
     while (data < end) {
-        while (data < end && isspace(*data)) data++;
+        while (data < end && isspace((uint8_t) *data)) data++;
         const char *start = data;
 
         /* Starts with quote is easy */
@@ -390,7 +394,7 @@ LOCAL void smtp_parse_email_addresses(int field, ArkimeSession_t *session, char 
             data++;
             while (data < end && *data != '"') data++;
             data++;
-            while (data < end && isspace(*data)) data++;
+            while (data < end && isspace((uint8_t) *data)) data++;
             start = data;
         }
 
@@ -418,7 +422,7 @@ LOCAL void smtp_parse_email_received(ArkimeSession_t *session, char *data, int l
         if (end - data > 10) {
             if (memcmp("from ", data, 5) == 0 && (data == start || data[-1] != '-')) {
                 data += 5;
-                while (data < end && isspace(*data)) data++;
+                while (data < end && isspace((uint8_t) *data)) data++;
 
                 if (*data == '[') {
                     data++;
@@ -440,7 +444,7 @@ LOCAL void smtp_parse_email_received(ArkimeSession_t *session, char *data, int l
                 arkime_field_string_add_lower(hostField, session, (char *)fromstart, data - fromstart);
             } else if (memcmp("by ", data, 3) == 0) {
                 data += 3;
-                while (data < end && isspace(*data)) data++;
+                while (data < end && isspace((uint8_t) *data)) data++;
                 char *fromstart = data;
                 while (data < end && *data != ' ' && *data != ')') {
                     if (*data == '@')
@@ -701,7 +705,7 @@ LOCAL int smtp_parser(ArkimeSession_t *session, void *uw, const uint8_t *data, i
                     smtp_parse_email_received(session, line->str + cpos, line->len - cpos);
                 } else if ((long)emailHeader->uw == ctField) {
                     const char *s = line->str + 13;
-                    while (isspace(*s)) s++;
+                    while (isspace((uint8_t) *s)) s++;
 
                     arkime_field_string_add(ctField, session, s, -1, TRUE);
                     char *boundary = (char *)arkime_memcasestr(s, line->len - (s - line->str), "boundary=", 9);
@@ -780,10 +784,13 @@ LOCAL int smtp_parser(ArkimeSession_t *session, void *uw, const uint8_t *data, i
 
                 if (found) {
                     if (email->base64Decode & (1 << which)) {
-                        const char *md5 = g_checksum_get_string(email->checksum[which]);
-                        arkime_field_string_add(md5Field, session, (char *)md5, 32, TRUE);
+                        uint8_t digest[MD5_DIGEST_LENGTH];
+                        char    md5[MD5_DIGEST_LENGTH * 2 + 1];
+                        MD5_Final(digest, &email->md5Ctx[which]);
+                        arkime_sprint_hex_string(md5, digest, MD5_DIGEST_LENGTH);
+                        arkime_field_string_add(md5Field, session, md5, 32, TRUE);
                         if (config.supportSha256) {
-                            const char *sha256 = g_checksum_get_string(email->checksum[which + 2]);
+                            const char *sha256 = g_checksum_get_string(email->sha256[which]);
                             arkime_field_string_add(sha256Field, session, (char *)sha256, 64, TRUE);
                         }
                     }
@@ -791,9 +798,9 @@ LOCAL int smtp_parser(ArkimeSession_t *session, void *uw, const uint8_t *data, i
                     email->base64Decode &= ~(1 << which);
                     email->state64[which] = 0;
                     email->save64[which] = 0;
-                    g_checksum_reset(email->checksum[which]);
+                    MD5_Init(&email->md5Ctx[which]);
                     if (config.supportSha256) {
-                        g_checksum_reset(email->checksum[which + 2]);
+                        g_checksum_reset(email->sha256[which]);
                     }
                     *state = EMAIL_MIME;
                 } else if (*state == EMAIL_MIME_DATA_RETURN) {
@@ -803,9 +810,9 @@ LOCAL int smtp_parser(ArkimeSession_t *session, void *uw, const uint8_t *data, i
                             gsize  b = g_base64_decode_step (line->str, line->len, buf,
                                                              &(email->state64[which]),
                                                              &(email->save64[which]));
-                            g_checksum_update(email->checksum[which], buf, b);
+                            MD5_Update(&email->md5Ctx[which], buf, b);
                             if (config.supportSha256) {
-                                g_checksum_update(email->checksum[which + 2], buf, b);
+                                g_checksum_update(email->sha256[which], buf, b);
                             }
 
                             if (email->firstInContent & (1 << which)) {
@@ -900,7 +907,7 @@ LOCAL int smtp_parser(ArkimeSession_t *session, void *uw, const uint8_t *data, i
 
             if (strncasecmp(line->str, "content-type:", 13) == 0) {
                 const char *s = line->str + 13;
-                while (isspace(*s)) s++;
+                while (isspace((uint8_t) *s)) s++;
                 char *boundary = (char *)arkime_memcasestr(s, line->len - (s - line->str), "boundary=", 9);
                 if (boundary && DLL_COUNT(s_, &email->boundaries) < SMTP_MAX_BOUNDARIES) {
                     ArkimeString_t *string = ARKIME_TYPE_ALLOC0(ArkimeString_t);
@@ -910,7 +917,7 @@ LOCAL int smtp_parser(ArkimeSession_t *session, void *uw, const uint8_t *data, i
                 }
             } else if (strncasecmp(line->str, "content-disposition:", 20) == 0) {
                 const char *s = line->str + 20;
-                while (isspace(*s)) s++;
+                while (isspace((uint8_t) *s)) s++;
                 char *filename = (char *)arkime_memcasestr(s, line->len - (s - line->str), "filename=", 9);
                 if (filename) {
                     char *matching = smtp_remove_matching(filename + 9, '"', '"');
@@ -961,11 +968,9 @@ LOCAL void smtp_free(ArkimeSession_t UNUSED(*session), void *uw)
     g_string_free(email->line[0], TRUE);
     g_string_free(email->line[1], TRUE);
 
-    g_checksum_free(email->checksum[0]);
-    g_checksum_free(email->checksum[1]);
     if (config.supportSha256) {
-        g_checksum_free(email->checksum[2]);
-        g_checksum_free(email->checksum[3]);
+        g_checksum_free(email->sha256[0]);
+        g_checksum_free(email->sha256[1]);
     }
 
     while (DLL_POP_HEAD(s_, &email->boundaries, string)) {
@@ -996,11 +1001,11 @@ LOCAL void smtp_classify(ArkimeSession_t *session, const uint8_t *data, int len,
         email->line[0] = g_string_sized_new(100);
         email->line[1] = g_string_sized_new(100);
 
-        email->checksum[0] = g_checksum_new(G_CHECKSUM_MD5);
-        email->checksum[1] = g_checksum_new(G_CHECKSUM_MD5);
+        MD5_Init(&email->md5Ctx[0]);
+        MD5_Init(&email->md5Ctx[1]);
         if (config.supportSha256) {
-            email->checksum[2] = g_checksum_new(G_CHECKSUM_SHA256);
-            email->checksum[3] = g_checksum_new(G_CHECKSUM_SHA256);
+            email->sha256[0] = g_checksum_new(G_CHECKSUM_SHA256);
+            email->sha256[1] = g_checksum_new(G_CHECKSUM_SHA256);
         }
 
         DLL_INIT(s_, &(email->boundaries));

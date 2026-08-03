@@ -1,3 +1,4 @@
+/******************************************************************************/
 /* pq.c  -- Priority Q
  *
  * Copyright 2012-2017 AOL Inc. All rights reserved.
@@ -62,7 +63,7 @@ ArkimePQ_t *arkime_pq_alloc(int timeout, ArkimePQ_cb cb)
 
     pq->timeout = timeout;
     for (int t = 0; t < config.packetThreads; t++) {
-        HASH_INIT(pqh_, pq->keys[t], arkime_string_hash, (HASH_CMP_FUNC)arkime_pq_cmp);
+        HASH_INIT(pqh_, pq->keys[t], arkime_session_hash, (HASH_CMP_FUNC)arkime_pq_cmp);
         DLL_INIT(pql_, &pq->lists[t]);
     }
     pq->cb = cb;

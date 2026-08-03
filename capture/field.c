@@ -274,8 +274,11 @@ int arkime_field_define_text_full(const char *field, const char *text, int *shor
     if (!group) {
         const char *dot = strchr(field, '.');
         if (dot) {
-            if (dot - field >= (int)sizeof(groupbuf) - 1)
-                LOGEXIT("ERROR - field '%s' too long", field);
+            if (dot - field >= (int)sizeof(groupbuf) - 1) {
+                LOG("ERROR - field '%s' too long", field);
+                g_strfreev(elements);
+                return -1;
+            }
             memcpy(groupbuf, field, dot - field);
             groupbuf[dot - field] = 0;
             group = groupbuf;
@@ -342,7 +345,7 @@ LOCAL int arkime_field_group_num(const char *group, int len)
     char       groupName[100];
 
     if (len + 1 >= (int)sizeof(groupName)) {
-        LOGEXIT("ERROR - field '%s' too long", group);
+        LOG("ERROR - field '%s' too long", group);
         return 0;
     }
     memcpy(groupName, group, len);
@@ -505,6 +508,8 @@ int arkime_field_define(const char *group, const char *kind, const char *express
     }
 
     if (flags & ARKIME_FIELD_FLAG_IPPRE) {
+        if (strncmp(expression, "ip.", 3) != 0 || strlen(dbField) < 2)
+            LOGEXIT("ERROR - IPPRE field '%s' needs an expression starting with 'ip.' and a dbField ending with 'ip'", expression);
         int l = strlen(dbField) - 2;
         int fnlen = strlen(friendlyName);
         snprintf(dbField2, sizeof(dbField2), "%.*sGEO", l, dbField);
@@ -1479,7 +1484,7 @@ int arkime_field_object_register(const char *name, const char *help, ArkimeField
 
     object_info = config.fields[object_pos];
 
-    // This shouldn't happen but lets be sure
+    // This shouldn't happen but let's be sure
     if (!object_info) {
         LOGEXIT("ERROR - Field object info is null");
     }
@@ -1938,6 +1943,8 @@ LOCAL gboolean arkime_field_load_field_remap(gpointer UNUSED(user_data))
             continue;
         }
         gchar *info = arkime_config_section_str(NULL, "custom-fields-remap", keys[i], NULL);
+        if (!info)
+            CONFIGEXIT("Invalid value for '%s' in section [custom-fields-remap]", keys[i]);
 
         char **kvs = g_strsplit(info, ";", 0);
         for (int k = 0; kvs[k]; k++) {
@@ -1947,9 +1954,9 @@ LOCAL gboolean arkime_field_load_field_remap(gpointer UNUSED(user_data))
                 continue;
             *value = 0;
             value++;
-            while (isspace(*key)) key++;
+            while (isspace((uint8_t) *key)) key++;
             g_strchomp(key);
-            while (isspace(*value)) value++;
+            while (isspace((uint8_t) *value)) value++;
             g_strchomp(value);
             int matchPos = arkime_field_by_exp_ignore_error(key);
             if (matchPos == -1) {
@@ -2154,13 +2161,13 @@ void arkime_field_exit()
 {
     ArkimeFieldInfo_t *info;
 
-    // Remove those are in both db & exp hash
+    // Remove those that are in both db & exp hash
     HASH_FORALL_POP_HEAD2(d_, fieldsByDb, info) {
         HASH_REMOVE(e_, fieldsByExp, info);
         arkime_field_free_info(info);
     }
 
-    // Remove those are only in exp
+    // Remove those that are only in exp
     HASH_FORALL_POP_HEAD2(e_, fieldsByExp, info) {
         arkime_field_free_info(info);
     }

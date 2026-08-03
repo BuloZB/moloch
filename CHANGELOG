@@ -35,22 +35,49 @@ NOTICE: Restart wiseService before capture when upgrading
 NOTICE: Cross-cluster Shortcuts require you to not restart all your viewers at once after upgrading
 NOTICE: Create a parliament config file before upgrading (see https://arkime.com/settings#parliament and https://arkime.com/faq#how_do_i_upgrade_to_arkime_5)
 
-6.6.1 2026/08/xx
+6.7.0 2026/08/xx
+## Release
+  - #4166 Node 22.23.2
 ## All
   - #4128 Add changePasswordSecret.js to re-encrypt all users' passwords and cont3xt keys after changing the passwordSecret
+  - #4134 Fix a cleared (null) user permission being treated as a denial instead of falling back to the roles' value
 ## Capture
   - #4120 Fix offline pcap runs (-r/-R) loading the stopped-sessions state file
   - #4121 Fix DNS HTTPS/SVCB records dropping a valid trailing zero-length SvcParam
   - #4121 Fix diameter parser not unregistering when its reassembly buffer overflowed
   - #4126 Add --sorted option to process offline pcap directories in alphabetical order
+  - #4143 Fix an over-long request URL (from a remote S3/SQS object key or IMDS role name) exiting capture instead of dropping the single request
+  - #4143 Fix SCTP in-order reassembly not bounding queued fragments, letting a stream of begin-without-end fragments grow memory unbounded
+  - #4143 Fix IPv4 fragment reassembly not recognizing the last fragment when it carried a DF or reserved flag bit, which could skip reassembly
+  - #4143 Fix the SQS reader holding a credentials pointer across its poll loop that could be freed after a credential refresh
+  - #4143 Fix a malformed or unreachable WISE server killing capture; WISE responses are now logged and skipped instead of exiting
+  - #4143 Fix a remote HTTP response's Content-Length pre-allocating up to 2GB; the response buffer now grows as data arrives
+  - #4149 Add 24 new magicMode=basic matches, including ELF, Mach-O, java class, wasm, OLE, lnk, 7z, zstd, sqlite and pcap
+  - #4149 Fix magicMode=basic returning audio/x-wav for every RIFF body, webp and avi are now identified correctly
+  - #4150 Add autoGenerateId=sequential, a lock free per thread session id generator that is much faster on session heavy traffic
+  - #4153 override-ips asn: values are now matched anchored, /^AS\d+ .+/; a value with anything before the AS number used to be accepted and silently recorded with AS number 0, and is now rejected
+  - #4153 Fix DTLS ja4 being computed over a truncated string when a ClientHello had many extensions or signature algorithms
+  - #4153 Fix TLS/DTLS ClientHello parsing desyncing when the cipher suites length was odd, which could hide the SNI and give a wrong ja3/ja4
+## Cont3xt/Viewer
+  - #4134 Add an MCP server at POST /mcp for viewer and cont3xt, off by default, enable with mcpEnabled.
+  - #4134 Add mcpUser role, required per user on top of the service role to use /mcp; superAdmin includes it, arkimeAdmin does not
 ## db.pl
   - #4127 Add reindex-sessions2 command to reindex sessions2 indices into sessions3, renaming flat fields to the ECS nested layout
+  - #4134 Add db.pl users-update command to bulk add/remove roles and set/unset fields on users matching a userId glob,
+          eg db.pl <host:port> users-update '*' --addRole mcpUser --dryrun
+  - #4162 Add initorupgrade/initorupgradenoprompt command to init a fresh cluster or upgrade an existing one,
+          whichever applies, pair with --ifneeded to no-op when already current
 ## Viewer
+  - #4080 Add dbAdmin role that grants Elasticsearch/OpenSearch admin access; the esAdminUsers setting is now deprecated and will be removed in Arkime 7
+  - #4081 Let the dbAdmin role use the ES stats action menus (index, shard, and task operations); the ES indices menu now only requires removeEnabled for deleting an index, matching the backend
   - #4120 Fix error responses crashing with an unhandled rejection when a session API handler passed an Error object to res.end
   - #4120 Fix addTagsList/removeTagsList completion callback not being reliably called
   - #4120 Hunts now fetch only the packet-related session fields instead of all fields, speeding up hunts on sessions with many fields
-  - #4080 Add dbAdmin role that grants Elasticsearch/OpenSearch admin access; the esAdminUsers setting is now deprecated and will be removed in Arkime 7
-  - #4081 Let the dbAdmin role use the ES stats action menus (index, shard, and task operations); the ES indices menu now only requires removeEnabled for deleting an index, matching the backend
+  - #4134 Add mcpMaxQueryDays limiting how much time an MCP query may span, in days, default 7, -1 for no limit
+  - #4160 Add dbTimestamp field to search on when a session was written to the database (@timestamp); session detail shows it after the stop time
+  - #4160 Fix date expression values ending in a timezone abbreviation (2026/07/27 09:33:05 UTC) generating an Invalid date ES query
+  - #4163 Add Packet Portal (experimental), a second viewer-to-viewer transport where a NAT'd sensor viewer dials out to a central viewer, which then sends its normal node-to-node requests (pcap, hunts, crons, proxying) back over that link; see packetPortal* settings
+  - #4172 Fix Download Entire PCAP failing on sensors behind esProxy; the rootId session search is now allowed through esProxy, and a failed search returns a 500 instead of an unhandled rejection
 
 6.6.0 2026/07/09
 ## Breaking
