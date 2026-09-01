@@ -23,6 +23,7 @@ permissions:
 jobs:
   generate-matrix:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
       freebsdmatrix: ${{ steps.set-matrix.outputs.freebsdmatrix }}
@@ -52,6 +53,7 @@ jobs:
 
   cache-node:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     outputs:
       node_version: ${{ steps.node-version.outputs.node_version }}
     steps:
@@ -106,6 +108,7 @@ jobs:
       PYTHON: ${{ matrix.python || 'python' }}
 
     runs-on: ${{ matrix.runson || 'ubuntu-latest' }}
+    timeout-minutes: 30
 
     container:
       image: ${{ matrix.container }}
@@ -150,6 +153,7 @@ jobs:
           ./easybutton-build.sh ${{ matrix.buildopt }} --rminstall
           ldd capture/capture
           export PATH=/opt/arkime/bin:$PATH
+          ${{ matrix.npmgcc }}
           INSTALL_BUNDLE=bundle make install
 
       - name: lint
@@ -383,6 +387,7 @@ jobs:
       cancel-in-progress: true
 
     runs-on: ${{ matrix.runson || 'ubuntu-latest' }}
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -445,6 +450,7 @@ jobs:
   create-manifest:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: github.event_name == 'push'
     permissions:
       contents: read
@@ -493,6 +499,7 @@ jobs:
 ############# Send Slack #############
   slack:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [build, freebsd-build]
     steps:
       - name: Checkout repository

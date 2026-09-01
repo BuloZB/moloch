@@ -7,7 +7,8 @@ Layout:
   - icmpv6_haad (3 packets)
   - ikev2_sa_init (3 packets)
   - dns_https_empty_alpn (3 packets)
-  - dns_https_trailing_empty_param (3 packets, appended last)
+  - dns_https_trailing_empty_param (3 packets)
+  - http2_pseudo_order (18 packets, appended last)
   - certs_keyusage (30 packets)
   - imap_crsplit (16 packets)
   - krb5_biglen (10 packets)
@@ -15,6 +16,7 @@ Layout:
   - s7comm_frameclamp (8 packets)
   - sctp_interleave (5 packets)
   - smb1_dialect0 (8 packets)
+  - ssdp (5 packets)
   - ... (see main() for the full section list)
   - tls_256ext (8 packets)
   - dhcpv6_relay (6 packets)
@@ -1600,6 +1602,102 @@ def sec_nbns_response():
     return out
 
 
+def sec_ssdp():
+    # SSDP coverage for parsers/ssdp.c (classify + header extraction):
+    #   1 (50100 -> 239.255.255.250:1900): M-SEARCH with ST + USER-AGENT
+    #   2 (10.20.9.20:1900 -> 50101):      HTTP/1.1 200 response (guarded path)
+    #                                       with ST/USN/SERVER/LOCATION
+    #   3 (50200 -> 239.255.255.250:1900): two NOTIFYs in one session -- the
+    #                                       second is handled by the registered
+    #                                       per-session parser
+    #   4 (50300 -> 239.255.255.250:5000): NOTIFY on a non-standard port --
+    #                                       content classifier, not port-based
+    import struct
+
+    MSEARCH = (b"M-SEARCH * HTTP/1.1\r\n"
+               b"HOST: 239.255.255.250:1900\r\n"
+               b"MAN: \"ssdp:discover\"\r\n"
+               b"MX: 2\r\n"
+               b"ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n"
+               b"USER-AGENT: SynthOS/1.0 UPnP/1.1 SynthClient/2.3\r\n\r\n")
+    RESPONSE = (b"HTTP/1.1 200 OK\r\n"
+                b"CACHE-CONTROL: max-age=1800\r\n"
+                b"EXT:\r\n"
+                b"LOCATION: http://10.20.9.20:8008/desc.xml\r\n"
+                b"SERVER: SynthOS/1.0 UPnP/1.0 SynthRenderer/3.1\r\n"
+                b"ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n"
+                b"USN: uuid:0a171e60-aaaa-bbbb-cccc-121314151617::urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n")
+    NOTIFY1 = (b"NOTIFY * HTTP/1.1\r\n"
+               b"HOST: 239.255.255.250:1900\r\n"
+               b"CACHE-CONTROL: max-age=1800\r\n"
+               b"LOCATION: http://10.20.9.30:80/desc.xml\r\n"
+               b"NT: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n"
+               b"NTS: ssdp:alive\r\n"
+               b"SERVER: SynthRouter/1.0 UPnP/1.0 IGD/1.0\r\n"
+               b"USN: uuid:11111111-2222-3333-4444-555566667777::urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\r\n")
+    NOTIFY2 = (b"NOTIFY * HTTP/1.1\r\n"
+               b"HOST: 239.255.255.250:1900\r\n"
+               b"CACHE-CONTROL: max-age=1800\r\n"
+               b"LOCATION: http://10.20.9.30:80/desc.xml\r\n"
+               b"NT: urn:schemas-upnp-org:service:WANIPConnection:1\r\n"
+               b"NTS: ssdp:alive\r\n"
+               b"SERVER: SynthRouter/1.0 UPnP/1.0 IGD/1.0\r\n"
+               b"USN: uuid:11111111-2222-3333-4444-555566667777::urn:schemas-upnp-org:service:WANIPConnection:1\r\n\r\n")
+    NOTIFY3 = (b"NOTIFY * HTTP/1.1\r\n"
+               b"HOST: 239.255.255.250:5000\r\n"
+               b"CACHE-CONTROL: max-age=1800\r\n"
+               b"LOCATION: http://10.20.9.31:5000/desc.xml\r\n"
+               b"NT: upnp:rootdevice\r\n"
+               b"NTS: ssdp:alive\r\n"
+               b"SERVER: SynthCam/2.0 UPnP/1.0 Cam/2.0\r\n"
+               b"USN: uuid:99999999-8888-7777-6666-555544443333::upnp:rootdevice\r\n\r\n")
+
+    TS_START = 1700009900.0
+    MCAST_IP = '239.255.255.250'
+    MCAST_MAC = bytes.fromhex('01005e7ffffa')
+    CLI_MAC = bytes.fromhex('02aa00001301')
+    SRV_MAC = bytes.fromhex('02aa00001302')
+    IGD_MAC = bytes.fromhex('02aa00001303')
+    CAM_MAC = bytes.fromhex('02aa00001304')
+
+    def csum(data):
+        if len(data) & 1:
+            data += b'\0'
+        s = sum(struct.unpack('>%dH' % (len(data) // 2), data))
+        while s >> 16:
+            s = (s & 0xffff) + (s >> 16)
+        return (~s) & 0xffff
+
+    def eth_ip_udp(src, dst, smac, dmac, sport, dport, payload):
+        udplen = 8 + len(payload)
+        iplen = 20 + udplen
+        ip = struct.pack('>BBHHHBBH4s4s', 0x45, 0, iplen, 1, 0, 64, 17, 0,
+                         bytes(map(int, src.split('.'))), bytes(map(int, dst.split('.'))))
+        ip = ip[:10] + struct.pack('>H', csum(ip)) + ip[12:]
+        udp = struct.pack('>HHHH', sport, dport, udplen, 0)
+        pseudo = ip[12:20] + struct.pack('>BBH', 0, 17, udplen)
+        ck = csum(pseudo + udp + payload)
+        udp = udp[:6] + struct.pack('>H', ck if ck else 0xffff)
+        return dmac + smac + b'\x08\x00' + ip + udp + payload
+
+    pkts = [
+        eth_ip_udp('10.20.9.10', MCAST_IP, CLI_MAC, MCAST_MAC, 50100, 1900, MSEARCH),
+        eth_ip_udp('10.20.9.20', '10.20.9.10', SRV_MAC, CLI_MAC, 1900, 50101, RESPONSE),
+        eth_ip_udp('10.20.9.30', MCAST_IP, IGD_MAC, MCAST_MAC, 50200, 1900, NOTIFY1),
+        eth_ip_udp('10.20.9.30', MCAST_IP, IGD_MAC, MCAST_MAC, 50200, 1900, NOTIFY2),
+        eth_ip_udp('10.20.9.31', MCAST_IP, CAM_MAC, MCAST_MAC, 50300, 5000, NOTIFY3),
+    ]
+
+    out = b''
+    ts = TS_START
+    for p in pkts:
+        sec = int(ts)
+        usec = int(round((ts - sec) * 1e6))
+        out += struct.pack('<IIII', sec, usec, len(p), len(p)) + p
+        ts += 0.05
+    return out
+
+
 def sec_ssh_kexinit_overrun():
     # SSH session whose client KEXINIT has a corrupt final name-list length
     # that runs past the record end, with a NEWKEYS record buffered in the
@@ -2468,6 +2566,140 @@ def sec_ip6_deep_offset():
     return struct.pack('<IIII', sec, 0, len(p), len(p)) + p
 
 
+def sec_http2_pseudo_order():
+    # Append an HTTP/2 http.uri regression session to arkime_synthetic.pcap.
+    #
+    # Session 10.9.20.1:49601 -> 10.9.20.2:80 (Ethernet linktype):
+    #   http.uri is built from :authority + :path, so cover the cases the
+    #   nghttp2 capture does not (it always sends :path before :authority):
+    #     - stream 1: :authority emitted BEFORE :path
+    #     - stream 3: :authority carries a port, which http.uri keeps and
+    #                 http.host strips
+    #     - stream 5: no :authority at all, so http.uri is just the path
+    #   All headers use HPACK literals without indexing so no dynamic table
+    #   state is needed.
+
+    CLI_IP = '10.9.20.1'
+    SRV_IP = '10.9.20.2'
+    CLI_PORT = 49601
+    SRV_PORT = 80
+    TS_START = 1700020000.0
+
+    CLI_MAC = bytes.fromhex('02aa00001401')
+    SRV_MAC = bytes.fromhex('02aa00001402')
+
+    PREFACE = b'PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n'
+
+
+    def csum(data):
+        if len(data) & 1:
+            data += b'\0'
+        s = sum(struct.unpack('>%dH' % (len(data) // 2), data))
+        while s >> 16:
+            s = (s & 0xffff) + (s >> 16)
+        return (~s) & 0xffff
+
+
+    def eth_ip_tcp(src, dst, smac, dmac, sport, dport, seq, ack, flags, payload=b''):
+        iplen = 20 + 20 + len(payload)
+        ip = struct.pack('>BBHHHBBH4s4s', 0x45, 0, iplen, 1, 0, 64, 6, 0,
+                         bytes(map(int, src.split('.'))), bytes(map(int, dst.split('.'))))
+        ip = ip[:10] + struct.pack('>H', csum(ip)) + ip[12:]
+        tcp = struct.pack('>HHIIBBHHH', sport, dport, seq, ack, 0x50, flags, 8192, 0, 0)
+        pseudo = ip[12:20] + struct.pack('>BBH', 0, 6, 20 + len(payload))
+        tcp = tcp[:16] + struct.pack('>H', csum(pseudo + tcp + payload)) + tcp[18:]
+        return dmac + smac + b'\x08\x00' + ip + tcp + payload
+
+
+    def hdr(name, value):
+        # HPACK literal header field without indexing, new name, no huffman
+        n = name.encode()
+        v = value.encode()
+        return b'\x00' + bytes([len(n)]) + n + bytes([len(v)]) + v
+
+
+    def frame(ftype, flags, streamid, body=b''):
+        return struct.pack('>BHBBI', len(body) >> 16, len(body) & 0xffff,
+                           ftype, flags, streamid) + body
+
+
+    def headers(streamid, *hdrs):
+        return frame(0x01, 0x05, streamid, b''.join(hdrs))   # END_STREAM|END_HEADERS
+
+
+    def build():
+        pkts = []
+        cseq, sseq = 0x3000, 0x4000
+
+        def c(flags, payload=b''):
+            nonlocal cseq
+            pkts.append(eth_ip_tcp(CLI_IP, SRV_IP, CLI_MAC, SRV_MAC, CLI_PORT, SRV_PORT,
+                                   cseq, sseq, flags, payload))
+            cseq += len(payload)
+
+        def s(flags, payload=b''):
+            nonlocal sseq
+            pkts.append(eth_ip_tcp(SRV_IP, CLI_IP, SRV_MAC, CLI_MAC, SRV_PORT, CLI_PORT,
+                                   sseq, cseq, flags, payload))
+            sseq += len(payload)
+
+        pkts.append(eth_ip_tcp(CLI_IP, SRV_IP, CLI_MAC, SRV_MAC, CLI_PORT, SRV_PORT,
+                               cseq, 0, 0x02))                     # SYN
+        cseq += 1
+        pkts.append(eth_ip_tcp(SRV_IP, CLI_IP, SRV_MAC, CLI_MAC, SRV_PORT, CLI_PORT,
+                               sseq, cseq, 0x12))                  # SYN-ACK
+        sseq += 1
+        c(0x10)                                                    # ACK
+
+        c(0x18, PREFACE + frame(0x04, 0, 0))                       # preface + empty SETTINGS
+        s(0x18, frame(0x04, 0, 0))
+        c(0x10)
+
+        # :authority before :path
+        c(0x18, headers(1,
+                        hdr(':method', 'GET'),
+                        hdr(':scheme', 'http'),
+                        hdr(':authority', 'h2order.synthetic.test'),
+                        hdr(':path', '/authority-first?a=1'),
+                        hdr('user-agent', 'arkime-synthetic-h2')))
+        s(0x18, headers(1, hdr(':status', '200')))
+        c(0x10)
+
+        # :authority with a port
+        c(0x18, headers(3,
+                        hdr(':method', 'POST'),
+                        hdr(':scheme', 'http'),
+                        hdr(':authority', 'h2port.synthetic.test:8443'),
+                        hdr(':path', '/with-port')))
+        s(0x18, headers(3, hdr(':status', '204')))
+        c(0x10)
+
+        # no :authority at all
+        c(0x18, headers(5,
+                        hdr(':method', 'GET'),
+                        hdr(':scheme', 'http'),
+                        hdr(':path', '/no-authority')))
+        s(0x18, headers(5, hdr(':status', '404')))
+        c(0x10)
+
+        c(0x11)                                                    # FIN
+        cseq += 1
+        s(0x11)                                                    # FIN
+        sseq += 1
+        c(0x10)
+
+        out = b''
+        ts = TS_START
+        for p in pkts:
+            sec = int(ts)
+            usec = int(round((ts - sec) * 1e6))
+            out += struct.pack('<IIII', sec, usec, len(p), len(p)) + p
+            ts += 0.05
+
+        return out
+    return build()
+
+
 def main():
     outpath = sys.argv[1] if len(sys.argv) > 1 else 'pcap/arkime_synthetic.pcap'
     out = LEGACY
@@ -2483,6 +2715,7 @@ def main():
     out += sec_smb1_dialect0()
     out += sec_smb1_malformed_delete()
     out += sec_nbns_response()
+    out += sec_ssdp()
     out += sec_ssh_kexinit_overrun()
     out += sec_udp_zero_ulen()
     out += sec_websocket_split()
@@ -2495,6 +2728,7 @@ def main():
     out += sec_ip4_deep_offset()
     out += sec_ip6_deep_offset()
     out += sec_dns_https_trailing_empty_param()
+    out += sec_http2_pseudo_order()
     with open(outpath, 'wb') as f:
         f.write(out)
     print('Created ' + outpath)

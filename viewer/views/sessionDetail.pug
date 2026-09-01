@@ -340,7 +340,9 @@ dl
 
   if (session.tcp)
     +arrayList(session.tcp, "ja4l", "JA4l", "tcp.ja4l")
+    +arrayList(session.tcp, "ja4l-delta", "JA4l-Delta", "tcp.ja4l-delta")
     +arrayList(session.tcp, "ja4ls", "JA4ls", "tcp.ja4ls")
+    +arrayList(session.tcp, "ja4ls-delta", "JA4ls-Delta", "tcp.ja4ls-delta")
     +arrayList(session.tcp, "ja4t", "JA4t", "tcp.ja4t")
     +arrayList(session.tcp, "ja4ts", "JA4ts", "tcp.ja4ts")
 
@@ -424,6 +426,32 @@ dl
       if (session.tcpseq.dst !== undefined)
         strong.ms-1 Dst
         +arrayPrint(session.tcpseq, "dst", "tcpseq.dst")
+
+  if (session.tcpSynValidated !== undefined || session.tcpSynAckValidated !== undefined || session.srcISNCnt !== undefined)
+    dt
+      b-dropdown.clickable-label(text="TCP Handshake", size="sm", variant="default")
+        if (session.tcpSynValidated !== undefined)
+          +clickableLabelBody('tcp.synValidated', 'TCP SYN Validated')
+          +clickableFieldActions('tcp.synValidated', false)
+        if (session.tcpSynAckValidated !== undefined)
+          +clickableLabelBody('tcp.synAckValidated', 'TCP SYN-ACK Validated')
+          +clickableFieldActions('tcp.synAckValidated', false)
+        if (session.srcISNCnt !== undefined)
+          +clickableLabelBody('tcp.srcISNCnt', 'TCP Src ISN Count')
+          +clickableFieldActions('tcp.srcISNCnt', false)
+    dd
+      if (session.tcpSynValidated !== undefined)
+        span.no-wrap
+          strong.ms-1 SYN Validated
+          +clickableValue('tcp.synValidated', '' + session.tcpSynValidated)
+      if (session.tcpSynAckValidated !== undefined)
+        span.no-wrap
+          strong.ms-1 SYN-ACK Validated
+          +clickableValue('tcp.synAckValidated', '' + session.tcpSynAckValidated)
+      if (session.srcISNCnt !== undefined)
+        span.no-wrap
+          strong.ms-1 Src ISN Count
+          +clickableValue('tcp.srcISNCnt', session.srcISNCnt)
 
   if (session.icmp)
     dt

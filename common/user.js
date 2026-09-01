@@ -14,20 +14,21 @@ const { LRUCache } = require('lru-cache');
 const otplib = require('otplib');
 const QRCode = require('qrcode');
 
-const systemRolesMapping = {
-  superAdmin: ['usersAdmin', 'arkimeAdmin', 'arkimeUser', 'parliamentAdmin', 'parliamentUser', 'wiseAdmin', 'wiseUser', 'cont3xtAdmin', 'cont3xtUser', 'dbAdmin', 'mcpUser'],
-  usersAdmin: [],
-  arkimeAdmin: ['arkimeUser'],
-  arkimeUser: [],
-  mcpUser: [],
-  parliamentAdmin: ['parliamentUser'],
-  parliamentUser: [],
-  wiseAdmin: ['wiseUser'],
-  wiseUser: [],
-  cont3xtAdmin: ['cont3xtUser'],
-  cont3xtUser: [],
-  dbAdmin: []
-};
+// Use map for security
+const systemRolesMapping = new Map([
+  ['superAdmin', ['usersAdmin', 'arkimeAdmin', 'arkimeUser', 'parliamentAdmin', 'parliamentUser', 'wiseAdmin', 'wiseUser', 'cont3xtAdmin', 'cont3xtUser', 'dbAdmin', 'mcpUser']],
+  ['usersAdmin', []],
+  ['arkimeAdmin', ['arkimeUser']],
+  ['arkimeUser', []],
+  ['mcpUser', []],
+  ['parliamentAdmin', ['parliamentUser']],
+  ['parliamentUser', []],
+  ['wiseAdmin', ['wiseUser']],
+  ['wiseUser', []],
+  ['cont3xtAdmin', ['cont3xtUser']],
+  ['cont3xtUser', []],
+  ['dbAdmin', []]
+]);
 
 const adminRoles = ['usersAdmin', 'arkimeAdmin', 'parliamentAdmin', 'wiseAdmin', 'cont3xtAdmin', 'dbAdmin'];
 const adminRolesWithSuper = ['superAdmin', 'usersAdmin', 'arkimeAdmin', 'parliamentAdmin', 'wiseAdmin', 'cont3xtAdmin', 'dbAdmin'];
@@ -129,7 +130,7 @@ class User {
     if (userRoleMappings) {
       User.#dynamicRolesFuncs = new Map();
       for (const [role, func] of Object.entries(userRoleMappings)) {
-        if (!systemRolesMapping[role] && !role.startsWith('role:')) {
+        if (!systemRolesMapping.has(role) && !role.startsWith('role:')) {
           console.log(`ERROR - user-role-mappings ${role} must start with role: or be a system role`);
           process.exit(1);
         }
@@ -238,7 +239,7 @@ class User {
    * search against user index, promise only
    * @param query.from first index
    * @param query.size number of items
-   * @param query.filter search userId userName for
+   * @param query.filter search userId userName for; a leading ! excludes users that have a matching role (when "roles" is in searchFields)
    * @param query.sortField the field to sort on, default userId
    * @param query.sortDescending sort descending, default false
    * @param query.noRoles filters out users with ids starting with 'role:', default false
@@ -438,7 +439,7 @@ class User {
 
     User.#rolesCache._timeStamp = Date.now();
     const userAllRoles = await User.#implementation.allRoles();
-    User.#rolesCache.roles = new Set([...Object.keys(systemRolesMapping), ...userAllRoles]);
+    User.#rolesCache.roles = new Set([...systemRolesMapping.keys(), ...userAllRoles]);
     return User.#rolesCache.roles;
   }
 
@@ -768,7 +769,7 @@ class User {
       return res.serverError(403, 'Username can not be empty');
     }
 
-    if (systemRolesMapping[req.body.userId]) {
+    if (systemRolesMapping.has(req.body.userId)) {
       return res.serverError(403, `User ID can't be a system role id`);
     }
 
@@ -953,7 +954,7 @@ class User {
       return res.serverError(403, "_moloch_shared is a shared user. This user's settings cannot be updated");
     }
 
-    if (systemRolesMapping[userId]) {
+    if (systemRolesMapping.has(userId)) {
       return res.serverError(403, `User ID can't be a system role id`);
     }
 
@@ -1415,9 +1416,9 @@ class User {
       const r = rolesQ.pop();
 
       // Deal with system roles first, they are easy
-      if (systemRolesMapping[r]) {
+      if (systemRolesMapping.has(r)) {
         allRoles.add(r);
-        systemRolesMapping[r].forEach(allRoles.add, allRoles);
+        systemRolesMapping.get(r).forEach(allRoles.add, allRoles);
         continue;
       }
 
@@ -1447,7 +1448,7 @@ class User {
    */
   static validateRoles (roles) {
     for (const r of roles) {
-      if (!systemRolesMapping[r] && !r.startsWith('role:')) {
+      if (!systemRolesMapping.has(r) && !r.startsWith('role:')) {
         return false;
       }
     }
@@ -1494,7 +1495,7 @@ class User {
 
     // We only look at our direct roles for settings, since those should already be expanded
     for (const r of rolesQ) {
-      if (systemRolesMapping[r]) {
+      if (systemRolesMapping.has(r)) {
         continue;
       }
 
@@ -1533,9 +1534,9 @@ class User {
       const r = rolesQ.pop();
 
       // Deal with system roles first, they are easy
-      if (systemRolesMapping[r]) {
+      if (systemRolesMapping.has(r)) {
         allRoles.add(r);
-        systemRolesMapping[r].forEach(allRoles.add, allRoles);
+        systemRolesMapping.get(r).forEach(allRoles.add, allRoles);
         continue;
       }
 
@@ -1773,6 +1774,14 @@ class User {
     return this.#allRoles;
   }
 
+  /**
+   * Return one of the allSettingColumns permissions, expanded from ourselves
+   * and the roles we have. webEnabled isn't one of them, it has no roles.
+   */
+  getPermission (permission) {
+    return this.#allSettings[permission];
+  }
+
   getExpression () {
     return this.#allExpression;
   }
@@ -1790,10 +1799,14 @@ class User {
   async updateDynamicRoles (vals) {
     if (!User.#dynamicRolesFuncs) { return; }
 
+    // Expressions get a curated copy as `this`, not the raw record, so they
+    // can't read passStore/totpSecret/cont3xt keys
+    const thisView = Object.freeze(Object.fromEntries(searchColumns.map(c => [c, this[c]])));
+
     const newRoles = [];
     for (const [role, func] of User.#dynamicRolesFuncs) {
       try {
-        const result = await func.call(this, vals);
+        const result = await func.call(thisView, vals);
         if (result) {
           newRoles.push(role);
         }
@@ -1924,15 +1937,20 @@ function sortUsers (users, sortField, sortDescending) {
 function filterUsers (users, filter, searchFields, noRoles) {
   const validSearchFields = searchFields
     ?.filter(field => field === 'userId' || field === 'userName' || field === 'roles') || [];
+  // a leading ! excludes users that have a matching role
+  const negateRoles = filter?.startsWith('!') && validSearchFields.includes('roles');
+  if (negateRoles) { filter = filter.slice(1); }
   const usingFilter = filter && validSearchFields.length;
-  if (!noRoles && !usingFilter) {
+  if (!noRoles && !usingFilter && !negateRoles) {
     return users; // nothing to filter on
   }
-  const re = usingFilter ? ArkimeUtil.wildcardToRegexp(`*${filter}*`) : null;
+  const re = (usingFilter || negateRoles) ? ArkimeUtil.wildcardToRegexp(`*${filter}*`) : null;
 
   return users.filter(user => {
     // exclude roles
     if (noRoles && user.userId.startsWith('role:')) { return false; }
+
+    if (negateRoles) { return !user.roles?.some(v => v.match(re)); }
 
     // filter searched fields
     return (!usingFilter || validSearchFields.some(field => Array.isArray(user[field]) ? user[field].some(v => v.match(re)) : user[field]?.match(re)));
@@ -2026,10 +2044,17 @@ class UserESImplementation {
     }
 
     if (query.filter && query.searchFields.length) {
-      const searchFilters = query.searchFields
-        .filter(field => field === 'userId' || field === 'userName' || field === 'roles')
-        .map(validField => { return { wildcard: { [validField]: '*' + query.filter + '*' } }; });
-      if (searchFilters.length) { esQuery.query.bool.should = searchFilters; }
+      if (query.filter.startsWith('!') && query.searchFields.includes('roles')) {
+        // a leading ! excludes users that have a matching role
+        esQuery.query.bool.must_not.push({
+          wildcard: { roles: '*' + query.filter.slice(1) + '*' }
+        });
+      } else {
+        const searchFilters = query.searchFields
+          .filter(field => field === 'userId' || field === 'userName' || field === 'roles')
+          .map(validField => { return { wildcard: { [validField]: '*' + query.filter + '*' } }; });
+        if (searchFilters.length) { esQuery.query.bool.should = searchFilters; }
+      }
     }
 
     if (query.sortField && !ArkimeUtil.isPP(query.sortField)) {

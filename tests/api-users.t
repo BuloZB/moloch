@@ -1,7 +1,7 @@
 # Many of these test user/roles start with sac- (skip auto create) because
 # otherwise viewer in regression mode would auto create the user.
 # Some day should remove all autocreate code.
-use Test::More tests => 266;
+use Test::More tests => 282;
 use Cwd;
 use URI::Escape;
 use ArkimeTest;
@@ -242,6 +242,23 @@ anonymous,,true,true,false,"arkimeAdmin, cont3xtUser, parliamentUser, usersAdmin
     $users = viewerPost("/api/users", "filter=nonExistentRole");
     is (@{$users->{data}}, 0, "filter by non-existent role");
     is ($users->{recordsFiltered}, 0);
+
+# Filter by !role (users without that role)
+    $users = viewerPost("/api/users", "filter=!arkimeUser");
+    is (@{$users->{data}}, 3, "filter by !arkimeUser");
+    is ($users->{recordsFiltered}, 3);
+
+    $users = viewerPost("/api/users", "filter=!usersAdmin");
+    is (@{$users->{data}}, 3, "filter by !usersAdmin");
+    is ($users->{recordsFiltered}, 3);
+
+    $users = viewerPost("/api/users", "filter=!nonExistentRole");
+    is (@{$users->{data}}, 5, "filter by !non-existent role");
+    is ($users->{recordsFiltered}, 5);
+
+    $users = viewerPost("/api/users", "filter=!");
+    is (@{$users->{data}}, 1, "filter by bare ! (users with no roles)");
+    is ($users->{data}->[0]->{userId}, "sac-test2", "bare ! matches only sac-test2");
 
 # users/min with noRoles and no filter (should not crash)
     $json = viewerPostToken("/api/users/min", "", $token);
@@ -629,6 +646,15 @@ test100,,true,true,false,"arkimeUser, cont3xtUser, parliamentUser, wiseUser",tru
 test101,,true,true,false,"arkimeUser, cont3xtUser, parliamentUser, wiseUser",true,true,true,,,,,,
 ', "CSV Users 2");
 
+# Filter by !role works for user-defined roles (stored with role: prefix), with or without the prefix
+    $users = viewerPost("/api/users", "filter=!role:sac-test1");
+    is (@{$users->{data}}, 8, "filter by !role:sac-test1 excludes role:sac-test2");
+    is ($users->{recordsFiltered}, 8);
+
+    $users = viewerPost("/api/users", "filter=!sac-test1");
+    is (@{$users->{data}}, 8, "filter by !sac-test1 without role: prefix");
+    is ($users->{recordsFiltered}, 8);
+
 # Delete Users
     $json = viewerDeleteToken("/api/user/notadmin", $token);
     $json = viewerDeleteToken("/api/user/sac-test1", $token);
@@ -760,6 +786,22 @@ my $uaToken = getTokenCookie('testusersadmin');
     ok($json->{success}, "sac-userExplicitTrue created");
     $json = viewerGetToken("/api/user?arkimeRegressionUser=sac-userExplicitTrue", $token);
     is($json->{emailSearch}, 1, "sac-userExplicitTrue emailSearch true (explicit)");
+
+    # a role granted setting is enforced by query building
+    my $emailExp = uri_escape('email.src == "foo@example.com"');
+    my $emailDenied = 'email.src - permission denied, ask your Arkime admin to give you access using + on Users tab';
+
+    $json = viewerGet("/api/buildquery?arkimeRegressionUser=sac-userInheritAB&date=-1&expression=$emailExp");
+    ok(!exists $json->{error}, "sac-userInheritAB can query email fields (emailSearch from role)");
+
+    $json = viewerGet("/api/buildquery?arkimeRegressionUser=sac-userInheritA&date=-1&expression=$emailExp");
+    ok(!exists $json->{error}, "sac-userInheritA can query email fields (emailSearch explicit)");
+
+    $json = viewerGet("/api/buildquery?arkimeRegressionUser=sac-userExplicitFalse&date=-1&expression=$emailExp");
+    is($json->{error}, $emailDenied, "sac-userExplicitFalse can not query email fields (explicit false beats role)");
+
+    $json = viewerGet("/api/buildquery?arkimeRegressionUser=sac-userInheritC&date=-1&expression=$emailExp");
+    is($json->{error}, $emailDenied, "sac-userInheritC can not query email fields (no role grants it)");
 
 # Check appversion
     $json = viewerGetToken("/api/appversion", $token);

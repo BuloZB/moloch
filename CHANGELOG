@@ -35,12 +35,30 @@ NOTICE: Restart wiseService before capture when upgrading
 NOTICE: Cross-cluster Shortcuts require you to not restart all your viewers at once after upgrading
 NOTICE: Create a parliament config file before upgrading (see https://arkime.com/settings#parliament and https://arkime.com/faq#how_do_i_upgrade_to_arkime_5)
 
-6.7.0 2026/08/xx
+6.7.1 2026/08/xx
+## All
+  - #4215 Fix email searches, periodic queries and cont3xt history deletes ignoring permissions that come from a role instead of the user (thanks @Juwon1405)
+## Capture
+  - #4217 Fix HTTP/2 sessions leaving http.uri empty, only http.uri.path was filled in
+  - #4223 Fix JA4 being wrong when the TLS/DTLS client hello has GREASE values in the signature algorithms extension
+  - #4224 Add ssdp parser
+  - #4224 Add dhcp.yiaddr, the server assigned address from OFFER/ACK, and dhcp.paramReqList, the parameter request list
+  - #4224 Add DNS PTR and SRV answer parsing
+## Viewer
+  - #4216 Fix multi viewer hanging or failing queries when one cluster is down or unhealthy (thanks @Juwon1405)
+  - #4222 Fix session PCAP/CSV export success toast showing "[object Object]"
+
+6.7.0 2026/08/19
 ## Release
   - #4166 Node 22.23.2
+  - #4196 Cyberchef 11.3.0
 ## All
   - #4128 Add changePasswordSecret.js to re-encrypt all users' passwords and cont3xt keys after changing the passwordSecret
   - #4134 Fix a cleared (null) user permission being treated as a denial instead of falling back to the roles' value
+  - #4183 Add !role search filter on the Users tab to list users that don't have a matching role
+  - #4194 Add Microsoft Teams notifier (uses Power Automate Workflows webhooks)
+  - #4202 Exit at startup when a header authMode has no userNameHeader instead of failing every request
+  - #4206 Fix changePasswordSecret.js sometimes accepting a wrong old passwordSecret for a user, re-encrypting their password from garbage instead of leaving them alone
 ## Capture
   - #4120 Fix offline pcap runs (-r/-R) loading the stopped-sessions state file
   - #4121 Fix DNS HTTPS/SVCB records dropping a valid trailing zero-length SvcParam
@@ -58,15 +76,42 @@ NOTICE: Create a parliament config file before upgrading (see https://arkime.com
   - #4153 override-ips asn: values are now matched anchored, /^AS\d+ .+/; a value with anything before the AS number used to be accepted and silently recorded with AS number 0, and is now rejected
   - #4153 Fix DTLS ja4 being computed over a truncated string when a ClientHello had many extensions or signature algorithms
   - #4153 Fix TLS/DTLS ClientHello parsing desyncing when the cipher suites length was odd, which could hide the SNI and give a wrong ja3/ja4
+  - #4178 Add tcp.synValidated and tcp.synAckValidated fields recording whether each side of the TCP handshake was sequence-validated, and tcp.srcISNCnt counting distinct client ISNs seen (thanks @jeffreygolden)
+  - #4187 Fix crash when redefining the type of a builtin field via wise or custom-fields
+  - #4188 Add wiseRequestTimeout setting, default 30 seconds, so a stuck wiseService doesn't delay capture shutdown for minutes
+  - #4207 Fix pcap-over-IP counting a 65536 byte packet as corrupt instead of reporting it as too large
+  - #4207 Fix snapLen allowing 65536, one more than capture can represent, which recorded a max size packet as zero length
+  - #4207 Fix tunneled ethernet frames more than 2048 bytes into a packet recording the wrong src/dst MACs
+  - #4207 Fix the add-file and add-dir commands leaking memory, and possibly crashing, when given a bad --op
+  - #4207 Fix a memory leak writing pcap to S3 when the endpoint repeats an ETag header
 ## Cont3xt/Viewer
+  - #4190 Cont3xt URLHaus and MalwareBazaar integrations now require an API key (free at https://auth.abuse.ch/)
+  - #4190 Fix Cont3xt URLHaus and MalwareBazaar rendering an empty card by adding their missing card fields (thanks @m-jingu)
   - #4134 Add an MCP server at POST /mcp for viewer and cont3xt, off by default, enable with mcpEnabled.
   - #4134 Add mcpUser role, required per user on top of the service role to use /mcp; superAdmin includes it, arkimeAdmin does not
+  - #4208 /mcp using a header auth mode now only allows localhost until mcpAllowedIps is set, the same as userAuthIps does for the rest of the site
 ## db.pl
   - #4127 Add reindex-sessions2 command to reindex sessions2 indices into sessions3, renaming flat fields to the ECS nested layout
   - #4134 Add db.pl users-update command to bulk add/remove roles and set/unset fields on users matching a userId glob,
           eg db.pl <host:port> users-update '*' --addRole mcpUser --dryrun
   - #4162 Add initorupgrade/initorupgradenoprompt command to init a fresh cluster or upgrade an existing one,
           whichever applies, pair with --ifneeded to no-op when already current
+  - #4208 Fix rm and mv acting on more than the named pcap file, a name with a wildcard or a space could remove the wrong files, and only the first 10 matches were ever handled
+  - #4208 Fix mv failing on pcap filenames that contain a quote or a backslash
+  - #4208 Fix expire deleting shrunk daily session indices a day early
+  - #4208 Fix expire --segments not also raising the --segmentsmin default, which force merged indices that didn't need it
+  - #4208 Fix import and restore reporting success when OpenSearch/Elasticsearch had rejected every document
+  - #4208 Fix restore ignoring the cont3xt indices that backup saves
+  - #4208 Fix add-missing and sync-files adding another node's files when a node name contains a '.', or exiting when it contains a '['
+  - #4208 Fix the es-adduser and es-passwd commands showing the password as it is typed
+  - #4208 Fix upgrade only checking the first 1000 capture nodes are stopped, and disable-users only looking at the first 1000 users
+## Cont3xt
+  - #4204 Fix cont3xt exiting when asked for an integration named after a built-in javascript property
+  - #4204 Fix cont3xt exiting on every link group fetch after invalid settings were saved; general and integration settings are now validated and report a real save failure
+  - #4204 Searching a single integration is now recorded in history, the same as a full search
+  - #4204 Add maxBulkIndicators, default 500, limiting how many indicators one search can query at once
+  - #4204 Fix history paging, sorting and search parameters not being validated for all database backends
+  - #4204 Fix an error while running a search exiting cont3xt instead of being logged
 ## Viewer
   - #4080 Add dbAdmin role that grants Elasticsearch/OpenSearch admin access; the esAdminUsers setting is now deprecated and will be removed in Arkime 7
   - #4081 Let the dbAdmin role use the ES stats action menus (index, shard, and task operations); the ES indices menu now only requires removeEnabled for deleting an index, matching the backend
@@ -78,6 +123,19 @@ NOTICE: Create a parliament config file before upgrading (see https://arkime.com
   - #4160 Fix date expression values ending in a timezone abbreviation (2026/07/27 09:33:05 UTC) generating an Invalid date ES query
   - #4163 Add Packet Portal (experimental), a second viewer-to-viewer transport where a NAT'd sensor viewer dials out to a central viewer, which then sends its normal node-to-node requests (pcap, hunts, crons, proxying) back over that link; see packetPortal* settings
   - #4172 Fix Download Entire PCAP failing on sensors behind esProxy; the rootId session search is now allowed through esProxy, and a failed search returns a 500 instead of an unhandled rejection
+  - #4203 Fix scrubbing pcap on a session held by a remote node exiting the viewer
+  - #4203 Fix a repeated query parameter (order, startTime, stopTime) never answering
+## WISE
+  - #4205 Fix intel files downloaded to /tmp being written through, or loaded from, a symlink or a file owned by another user
+  - #4205 Fix looked up values being able to inject into threatstream api requests, splunk searches, and redis key templates
+  - #4205 Fix threatstream sqlite3 mode failing on an itype name containing a quote
+  - #4205 Fix wiseService exiting on a valueactions or fieldactions file that has a section header in it
+  - #4205 Fix wiseService exiting on a csv url source whose rows are shorter than the key column
+  - #4205 Fix wiseService exiting on unexpected threatstream, threatq or alienvault data; a load that finds nothing now keeps the previous data
+  - #4205 Fix virustotal, opendns and passivetotal never looking a value up again when the service returned no result for it
+  - #4205 Fix isepxgrid returning nothing for the length of its session cache refresh
+  - #4205 Fix a phpipam url containing a quote breaking every right click action in viewer
+  - #4205 Fix the config UI erroring instead of rejecting a section named after a javascript property
 
 6.6.0 2026/07/09
 ## Breaking

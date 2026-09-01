@@ -690,7 +690,7 @@ LOCAL gboolean arkime_packet_frags_process(ArkimePacket_t *const packet)
     }
 
     // Packet is too large, hacker
-    if (payloadLen + packet->payloadOffset >= ARKIME_PACKET_MAX_LEN) {
+    if (payloadLen + packet->payloadOffset > ARKIME_PACKET_MAX_LEN) {
         droppedFrags++;
         arkime_packet_frags_free(frags);
         return FALSE;
@@ -1385,6 +1385,11 @@ LOCAL ArkimePacketRC arkime_packet_ether(ArkimePacketBatch_t *batch, ArkimePacke
 #endif
         return ARKIME_PACKET_CORRUPT;
     }
+
+    // Make sure the offset of the ethernet header fits in the 11 bit etherOffset field
+    if ((uint8_t *)data - packet->pkt >= 2048)
+        return ARKIME_PACKET_CORRUPT;
+
     packet->outerEtherOffset = packet->etherOffset; // we need to keep track of the current and the previous mac offset, we don't know if this is the last etherframe here
     packet->etherOffset = (uint8_t *)data - packet->pkt;
 #ifdef DEBUG_PACKET
@@ -2207,6 +2212,24 @@ void arkime_packet_init()
     arkime_field_define("general", "integer",
                         "tcpflags.ae", "TCP Flag AE", "tcpflags.ae",
                         "Count of packets with AE (Accurate ECN) flag set",
+                        0,  ARKIME_FIELD_FLAG_FAKE,
+                        (char *)NULL);
+
+    arkime_field_define("general", "termfield",
+                        "tcp.synValidated", "TCP SYN Validated", "tcpSynValidated",
+                        "True if a syn-ack acknowledged the initial sequence number of a syn actually observed in this session",
+                        0,  ARKIME_FIELD_FLAG_FAKE,
+                        (char *)NULL);
+
+    arkime_field_define("general", "termfield",
+                        "tcp.synAckValidated", "TCP SYN-ACK Validated", "tcpSynAckValidated",
+                        "True if an ack acknowledged the other side's syn-ack initial sequence number, which flag counts alone do not prove",
+                        0,  ARKIME_FIELD_FLAG_FAKE,
+                        (char *)NULL);
+
+    arkime_field_define("general", "integer",
+                        "tcp.srcISNCnt", "TCP Src ISN Count", "srcISNCnt",
+                        "Count of source SYNs whose initial sequence number differs from the first, plus the initial SYN; greater than one indicates multiple connection attempts merged into this session. Retransmits of the first SYN are not counted, but retransmits of a later attempt are",
                         0,  ARKIME_FIELD_FLAG_FAKE,
                         (char *)NULL);
 

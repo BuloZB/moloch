@@ -450,6 +450,16 @@ int arkime_field_define(const char *group, const char *kind, const char *express
         }
     }
 
+    if (minfo->pos != -1) {
+        // Once storage is assigned the type/flags can't change - the session
+        // field union and db.c save code depend on them staying fixed
+        if (minfo->type != type) {
+            LOG("WARNING - Field '%s' (db:%s) is already defined with a different type, ignoring type change", expression, minfo->dbFieldFull);
+        }
+        type  = minfo->type;
+        flags = minfo->flags;
+    }
+
     minfo->type     = type;
     minfo->flags    = flags;
 
@@ -1856,6 +1866,7 @@ void arkime_field_ops_add_match(ArkimeFieldOps_t *ops, int fieldPos, char *value
         case ARKIME_FIELD_SPECIAL_CLOSE_NOW:
         case ARKIME_FIELD_SPECIAL_FLIP_SRC_DST:
             op->strLenOrInt = 1;
+            op->str = 0; // ops array isn't zeroed, arkime_field_ops_free frees str
             break;
         default:
             LOG("WARNING - Unknown special field pos %d", fieldPos);

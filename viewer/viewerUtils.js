@@ -349,7 +349,9 @@ class ViewerUtils {
         url = new URL(nodePath, viewUrl);
       }
 
-      Auth.addS2SAuth(options, user, node, url.pathname, ViewerUtils.getClusterSecret(cluster));
+      // Sign the path exactly as the remote node will see it in req.url, query
+      // string included, otherwise any call with parameters fails s2s auth
+      Auth.addS2SAuth(options, user, node, url.pathname + (url.search ?? ''), ViewerUtils.getClusterSecret(cluster));
       if (!portal) { ViewerUtils.addCaTrust(options, node); }
 
       function responseFunc (pres) {
@@ -456,6 +458,8 @@ class ViewerUtils {
       if (anonUser) {
         anon.settings = anonUser.settings || {};
       }
+
+      await anon.expandFromRoles();
 
       return anon;
     } else {
